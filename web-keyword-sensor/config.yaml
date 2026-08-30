@@ -1,0 +1,52 @@
+name: Web Keyword Sensor
+version: "1.0.0"
+slug: web_keyword_sensor
+description: Create sensors from phrases found on web pages
+url: https://github.com/example/web-keyword-sensor
+startup: services
+boot: auto
+init: false
+arch:
+  - amd64
+  - aarch64
+  - armv7
+  - armhf
+  - i386
+options:
+  mqtt_host: homeassistant.local
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+  discovery_prefix: homeassistant
+  request_timeout: 30
+  checks: []
+schema:
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_username: str?
+  mqtt_password: password?
+  discovery_prefix: str
+  request_timeout: int(5,120)
+  checks:
+    - name: str
+      url: url
+      phrase: str
+      entity_type: list(binary_sensor|sensor)
+      interval: int(1,31536000)
+      unit: list(seconds|minutes|hours|days|weeks)
+      case_sensitive: bool
+      verify_ssl: bool
+      headers: dict?
+      enabled: bool
+map:
+  - addon_config:rw
+services:
+  - mqtt:need
+build_from:
+  amd64: ghcr.io/home-assistant/amd64-base-python:3.13-alpine
+  aarch64: ghcr.io/home-assistant/aarch64-base-python:3.13-alpine
+  armv7: ghcr.io/home-assistant/armv7-base-python:3.13-alpine
+  armhf: ghcr.io/home-assistant/armhf-base-python:3.13-alpine
+  i386: ghcr.io/home-assistant/i386-base-python:3.13-alpine
+environment:
+  PYTHONUNBUFFERED: "1"
