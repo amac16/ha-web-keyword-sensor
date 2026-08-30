@@ -32,8 +32,12 @@ The `binary_sensor` is `on` when the phrase occurs and `off` otherwise. A
 `sensor` reports `1` for a match and `0` otherwise. Multiple checks can be
 listed and run independently.
 
-The app uses MQTT discovery, so no Home Assistant API token is required. The
-default MQTT host is `homeassistant.local`; set broker credentials if needed.
+The form also supports selecting individual weekdays and a daily `From`/`To`
+window in one-hour increments. The existing interval remains the polling
+frequency while the time window controls when polling is allowed. Overnight
+windows such as 22:00 to 06:00 are supported. The app uses MQTT discovery, so
+no Home Assistant API token is required. The default MQTT host is
+`homeassistant.local`; set broker credentials if needed.
 
 ## Security and limitations
 

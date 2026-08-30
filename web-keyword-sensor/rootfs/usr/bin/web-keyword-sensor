@@ -11,6 +11,7 @@ STOP = threading.Event()
 TAGS = re.compile(r"<[^>]+>")
 SPACE = re.compile(r"\s+")
 UNITS = {"seconds": 1, "minutes": 60, "hours": 3600, "days": 86400, "weeks": 604800}
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 def text(value): return SPACE.sub(" ", html.unescape(TAGS.sub(" ", value))).strip()
 def slug(value): return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or "web_keyword"
@@ -25,6 +26,18 @@ def initial_checks(options):
     except (TypeError, json.JSONDecodeError): checks = []
     for check in checks: check.setdefault("id", ident(check))
     return checks
+def in_schedule(check):
+    now = time.localtime()
+    days = check.get("days", list(WEEKDAYS))
+    if WEEKDAYS[now.tm_wday] not in days: return False
+    def minutes(value, default):
+        try:
+            hour, minute = (int(x) for x in value.split(":", 1)); return hour * 60 + minute
+        except (AttributeError, ValueError): return default
+    current = now.tm_hour * 60 + now.tm_min
+    start = minutes(check.get("time_from", "00:00"), 0)
+    end = minutes(check.get("time_to", "23:00"), 1439)
+    return start <= current <= end if start <= end else current >= start or current <= end
 
 class App:
     def __init__(self, options):
@@ -46,6 +59,7 @@ class App:
         else: config.update(unit_of_measurement="matches", icon="mdi:text-search")
         self.client.publish(f"{self.options.get('discovery_prefix', 'homeassistant').strip('/')}/{component}/{name}/config", json.dumps(config), qos=1, retain=True); return f"{base}/state"
     def run(self, check, state_topic):
+        if not check.get("enabled", True): return
         try:
             headers = {"User-Agent": "Home Assistant Web Keyword Sensor/1.0"}; headers.update(check.get("headers") or {})
             response = requests.get(check["url"], headers=headers, timeout=int(self.options.get("request_timeout", 30)), verify=check.get("verify_ssl", True)); response.raise_for_status()
@@ -63,7 +77,7 @@ class App:
                 if not valid(check): continue
                 cid = check.setdefault("id", ident(check)); current.add(cid)
                 if cid not in self.known: self.known[cid] = self.discovery(check); self.due[cid] = 0
-                if self.due.get(cid, 0) <= now and cid not in self.running:
+                if in_schedule(check) and self.due.get(cid, 0) <= now and cid not in self.running:
                     self.running.add(cid)
                     def task(item=check, ident_=cid):
                         try: self.run(item, self.known[ident_])
