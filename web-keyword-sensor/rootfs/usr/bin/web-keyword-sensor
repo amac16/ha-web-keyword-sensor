@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Scrape configured web pages and publish MQTT discovery entities."""
-import hashlib, html, json, logging, re, signal, threading, time
+import hashlib, html, json, logging, os, re, signal, threading, time
 from urllib.parse import urlparse
 import paho.mqtt.client as mqtt
+import pyotp
 import requests
 from web_ui import CheckStore, start_server
 
@@ -61,19 +62,45 @@ class App:
     def run(self, check, state_topic):
         if not check.get("enabled", True): return
         try:
+            session = requests.Session()
             headers = {"User-Agent": "Home Assistant Web Keyword Sensor/1.0"}; headers.update(check.get("headers") or {})
-            response = requests.get(check["url"], headers=headers, timeout=int(self.options.get("request_timeout", 30)), verify=check.get("verify_ssl", True)); response.raise_for_status()
+            timeout = int(self.options.get("request_timeout", 30)); verify = check.get("verify_ssl", True)
+            if check.get("login_url"):
+                if not check.get("username") or not check.get("password"):
+                    self.auth_failure(check, "credentials are missing"); return
+                login = {check.get("username_field", "username"): check["username"], check.get("password_field", "password"): check["password"]}
+                if check.get("totp_secret"):
+                    login[check.get("totp_field", "totp")] = pyotp.TOTP(check["totp_secret"]).now()
+                auth_response = session.post(check["login_url"], data=login, headers=headers, timeout=timeout, verify=verify)
+                success_text = check.get("success_text")
+                if auth_response.status_code >= 400 or (success_text and success_text not in auth_response.text):
+                    self.auth_failure(check, f"login rejected (HTTP {auth_response.status_code})"); return
+                check["auth_status"] = "Credentials successful"
+                self.store.put(check)
+            response = session.get(check["url"], headers=headers, timeout=timeout, verify=verify)
+            if response.status_code in (401, 403):
+                self.auth_failure(check, f"credentials expired or invalid (HTTP {response.status_code})"); return
+            response.raise_for_status()
             found = check["phrase"] in text(response.text) if check.get("case_sensitive") else check["phrase"].casefold() in text(response.text).casefold()
             value = ("ON" if found else "OFF") if check["entity_type"] == "binary_sensor" else ("1" if found else "0")
             attrs = {"url": check["url"], "phrase": check["phrase"], "matched": found, "checked_at": int(time.time()), "http_status": response.status_code}
             self.client.publish(state_topic, value, qos=1, retain=True); self.client.publish(state_topic.rsplit("/", 1)[0] + "/attributes", json.dumps(attrs), qos=1, retain=True); LOG.info("%s: %s", check["name"], "matched" if found else "not matched")
         except requests.RequestException as error: LOG.warning("%s: request failed: %s", check.get("name", "unnamed"), error)
         except Exception: LOG.exception("%s: check failed", check.get("name", "unnamed"))
+    def auth_failure(self, check, reason):
+        check["auth_status"] = f"Authentication failed: {reason}"
+        self.store.put(check)
+        LOG.error("%s: authentication failed: %s", check.get("name", "unnamed"), reason)
+        token = os.environ.get("SUPERVISOR_TOKEN")
+        if token:
+            try:
+                requests.post("http://supervisor/core/api/services/persistent_notification/create", headers={"Authorization": f"Bearer {token}"}, json={"title": "Web Keyword Sensor authentication failure", "message": f"Authentication failed for {check.get('name', 'unnamed')}: {reason}"}, timeout=10)
+            except requests.RequestException: LOG.warning("Unable to create Home Assistant notification")
     def start(self):
         self.connect(); start_server(self.store); LOG.info("Web form available through app ingress")
         while not STOP.wait(1):
             now = time.monotonic(); current = set()
-            for check in self.store.get():
+            for check in self.store.get_runtime():
                 if not valid(check): continue
                 cid = check.setdefault("id", ident(check)); current.add(cid)
                 if cid not in self.known: self.known[cid] = self.discovery(check); self.due[cid] = 0

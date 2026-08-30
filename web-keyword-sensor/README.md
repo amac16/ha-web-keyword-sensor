@@ -39,6 +39,17 @@ windows such as 22:00 to 06:00 are supported. The app uses MQTT discovery, so
 no Home Assistant API token is required. The default MQTT host is
 `homeassistant.local`; set broker credentials if needed.
 
+## Optional site login
+
+Each check can optionally define a login URL, username, password, TOTP secret,
+the login form field names, and login success text. Credentials are stored in
+`/data/checks.json` with mode `0600` and are never returned by the management
+API. Leave secret fields blank while editing to preserve existing values. The
+app reports successful authentication in the form and sends a persistent Home
+Assistant notification when authentication fails or a protected page returns
+HTTP 401/403. JavaScript login flows, CAPTCHA, passkeys, SMS, and email codes
+require site-specific automation and are not supported by the generic login.
+
 ## Security and limitations
 
 Only HTTP and HTTPS URLs are accepted. Requests have a configurable timeout.

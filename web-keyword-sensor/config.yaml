@@ -1,5 +1,5 @@
 name: Web Keyword Sensor
-version: "1.1.0"
+version: "1.2.0"
 slug: web_keyword_sensor
 description: Create sensors from phrases found on web pages
 url: https://github.com/amac16/ha-web-keyword-sensor#readme
@@ -10,6 +10,7 @@ ingress: true
 ingress_port: 8099
 panel_icon: mdi:text-search
 panel_title: Web Keyword Sensor
+homeassistant_api: true
 arch:
   - amd64
   - aarch64
