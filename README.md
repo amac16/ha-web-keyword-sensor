@@ -12,6 +12,3 @@ Add the GitHub repository URL. The app will then appear under **Local apps** or
 as a custom repository app.
 
 The app source is in [`web-keyword-sensor/`](web-keyword-sensor/).
-
-Before publishing, replace the placeholder `url` and `maintainer` values in
-`repository.json`.
