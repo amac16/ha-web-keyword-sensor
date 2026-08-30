@@ -1,188 +1,81 @@
 #!/usr/bin/env python3
-"""Publish Home Assistant MQTT discovery entities backed by web phrase checks."""
-
-import hashlib
-import html
-import json
-import logging
-import os
-import re
-import signal
-import threading
-import time
+"""Scrape configured web pages and publish MQTT discovery entities."""
+import hashlib, html, json, logging, re, signal, threading, time
 from urllib.parse import urlparse
-
 import paho.mqtt.client as mqtt
 import requests
+from web_ui import CheckStore, start_server
 
 LOG = logging.getLogger("web_keyword_sensor")
 STOP = threading.Event()
-TAG_RE = re.compile(r"<[^>]+>")
-SPACE_RE = re.compile(r"\s+")
+TAGS = re.compile(r"<[^>]+>")
+SPACE = re.compile(r"\s+")
+UNITS = {"seconds": 1, "minutes": 60, "hours": 3600, "days": 86400, "weeks": 604800}
 
-
-def clean_text(source: str) -> str:
-    """Turn HTML into sufficient plain text for phrase matching."""
-    return SPACE_RE.sub(" ", html.unescape(TAG_RE.sub(" ", source))).strip()
-
-
-def interval_seconds(check: dict) -> int:
-    values = {"seconds": 1, "minutes": 60, "hours": 3600, "days": 86400, "weeks": 604800}
-    return int(check["interval"]) * values[check["unit"]]
-
-
-def slug(value: str) -> str:
-    value = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
-    return value or "web_keyword"
-
-
-def entity_id(check: dict) -> str:
-    # Hash avoids collisions when two checks have the same friendly name.
-    suffix = hashlib.sha1(check["url"].encode(), usedforsecurity=False).hexdigest()[:8]
-    return f"{slug(check['name'])}_{suffix}"
-
-
-def validate_check(check: dict) -> bool:
+def text(value): return SPACE.sub(" ", html.unescape(TAGS.sub(" ", value))).strip()
+def slug(value): return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or "web_keyword"
+def ident(check): return f"{slug(check['name'])}_{hashlib.sha1(check['url'].encode(), usedforsecurity=False).hexdigest()[:8]}"
+def valid(check):
     try:
-        parsed = urlparse(check["url"])
-        return parsed.scheme in ("http", "https") and bool(parsed.netloc) and bool(check["phrase"])
-    except (KeyError, TypeError):
-        return False
+        p = urlparse(check["url"]); return p.scheme in ("http", "https") and bool(p.netloc) and bool(check["phrase"])
+    except (KeyError, TypeError): return False
+def initial_checks(options):
+    raw = options.get("checks", "[]")
+    try: checks = raw if isinstance(raw, list) else json.loads(raw)
+    except (TypeError, json.JSONDecodeError): checks = []
+    for check in checks: check.setdefault("id", ident(check))
+    return checks
 
-
-def configured_checks(options: dict) -> list[dict]:
-    """Decode the JSON text field used for an arbitrary number of checks."""
-    checks = options.get("checks", "[]")
-    if isinstance(checks, list):
-        return checks
-    try:
-        decoded = json.loads(checks)
-        return decoded if isinstance(decoded, list) else []
-    except (TypeError, json.JSONDecodeError):
-        LOG.error("The checks option must contain a JSON array")
-        return []
-
-
-class WebKeywordSensor:
-    def __init__(self, options: dict):
-        self.options = options
-        self.prefix = options.get("discovery_prefix", "homeassistant").strip("/")
-        self.timeout = int(options.get("request_timeout", 30))
+class App:
+    def __init__(self, options):
+        self.options = options; self.store = CheckStore(initial_checks(options)); self.running = set(); self.due = {}; self.known = {}
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="web-keyword-sensor")
-        username = options.get("mqtt_username")
-        if username:
-            self.client.username_pw_set(username, options.get("mqtt_password") or None)
-        self.client.will_set("web_keyword_sensor/status", "offline", qos=1, retain=True)
-        self.client.on_connect = self.on_connect
-        self.client.on_disconnect = self.on_disconnect
-        self.connected = threading.Event()
-
+        if options.get("mqtt_username"): self.client.username_pw_set(options["mqtt_username"], options.get("mqtt_password") or None)
+        self.client.will_set("web_keyword_sensor/status", "offline", qos=1, retain=True); self.client.on_connect = self.connected; self.client.on_disconnect = self.disconnected
+    def connected(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code == 0: client.publish("web_keyword_sensor/status", "online", qos=1, retain=True); LOG.info("Connected to MQTT")
+        else: LOG.error("MQTT connection rejected: %s", reason_code)
+    def disconnected(self, client, userdata, flags, reason_code, properties=None):
+        if not STOP.is_set(): LOG.warning("MQTT disconnected: %s", reason_code)
     def connect(self):
-        host = self.options.get("mqtt_host", "homeassistant.local")
-        port = int(self.options.get("mqtt_port", 1883))
-        LOG.info("Connecting to MQTT broker %s:%s", host, port)
-        self.client.connect(host, port, keepalive=60)
-        self.client.loop_start()
-        if not self.connected.wait(30):
-            raise RuntimeError("MQTT connection timed out")
-
-    def on_connect(self, client, userdata, flags, reason_code, properties=None):
-        if reason_code == 0:
-            self.connected.set()
-            client.publish("web_keyword_sensor/status", "online", qos=1, retain=True)
-            LOG.info("Connected to MQTT")
-        else:
-            LOG.error("MQTT connection rejected: %s", reason_code)
-
-    def on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None):
-        self.connected.clear()
-        if not STOP.is_set():
-            LOG.warning("MQTT disconnected: %s", reason_code)
-
-    def publish_discovery(self, check: dict):
-        eid = entity_id(check)
-        topic_base = f"web_keyword_sensor/{eid}"
-        state_topic = f"{topic_base}/state"
-        component = check["entity_type"]
-        config = {
-            "name": check["name"],
-            "unique_id": f"web_keyword_sensor_{eid}",
-            "state_topic": state_topic,
-            "availability_topic": "web_keyword_sensor/status",
-            "payload_available": "online",
-            "payload_not_available": "offline",
-            "json_attributes_topic": f"{topic_base}/attributes",
-            "device": {"identifiers": ["web_keyword_sensor"], "name": "Web Keyword Sensor", "manufacturer": "Web Keyword Sensor"},
-        }
-        if component == "binary_sensor":
-            config.update({"payload_on": "ON", "payload_off": "OFF", "device_class": "presence"})
-        else:
-            config.update({"unit_of_measurement": "matches", "icon": "mdi:text-search"})
-        topic = f"{self.prefix}/{component}/{eid}/config"
-        self.client.publish(topic, json.dumps(config), qos=1, retain=True)
-        return state_topic
-
-    def run_check(self, check: dict, state_topic: str):
-        if not check.get("enabled", True):
-            return
-        headers = {"User-Agent": "Home Assistant Web Keyword Sensor/1.0"}
-        headers.update(check.get("headers") or {})
+        self.client.connect(self.options.get("mqtt_host", "homeassistant.local"), int(self.options.get("mqtt_port", 1883))); self.client.loop_start()
+    def discovery(self, check):
+        name = ident(check); base = f"web_keyword_sensor/{name}"; component = check["entity_type"]
+        config = {"name": check["name"], "unique_id": f"web_keyword_sensor_{name}", "state_topic": f"{base}/state", "availability_topic": "web_keyword_sensor/status", "payload_available": "online", "payload_not_available": "offline", "json_attributes_topic": f"{base}/attributes", "device": {"identifiers": ["web_keyword_sensor"], "name": "Web Keyword Sensor", "manufacturer": "Web Keyword Sensor"}}
+        if component == "binary_sensor": config.update(payload_on="ON", payload_off="OFF")
+        else: config.update(unit_of_measurement="matches", icon="mdi:text-search")
+        self.client.publish(f"{self.options.get('discovery_prefix', 'homeassistant').strip('/')}/{component}/{name}/config", json.dumps(config), qos=1, retain=True); return f"{base}/state"
+    def run(self, check, state_topic):
         try:
-            response = requests.get(check["url"], headers=headers, timeout=self.timeout, verify=check.get("verify_ssl", True))
-            response.raise_for_status()
-            haystack = clean_text(response.text)
-            needle = check["phrase"]
-            if check.get("case_sensitive", False):
-                found = needle in haystack
-            else:
-                found = needle.casefold() in haystack.casefold()
+            headers = {"User-Agent": "Home Assistant Web Keyword Sensor/1.0"}; headers.update(check.get("headers") or {})
+            response = requests.get(check["url"], headers=headers, timeout=int(self.options.get("request_timeout", 30)), verify=check.get("verify_ssl", True)); response.raise_for_status()
+            found = check["phrase"] in text(response.text) if check.get("case_sensitive") else check["phrase"].casefold() in text(response.text).casefold()
             value = ("ON" if found else "OFF") if check["entity_type"] == "binary_sensor" else ("1" if found else "0")
             attrs = {"url": check["url"], "phrase": check["phrase"], "matched": found, "checked_at": int(time.time()), "http_status": response.status_code}
-            self.client.publish(state_topic, value, qos=1, retain=True)
-            self.client.publish(state_topic.rsplit("/", 1)[0] + "/attributes", json.dumps(attrs), qos=1, retain=True)
-            LOG.info("%s: %s", check["name"], "matched" if found else "not matched")
-        except requests.RequestException as err:
-            LOG.warning("%s: request failed: %s", check.get("name", "unnamed"), err)
-        except Exception:
-            LOG.exception("%s: check failed", check.get("name", "unnamed"))
-
-    def worker(self, check: dict, state_topic: str):
-        delay = interval_seconds(check)
-        while not STOP.is_set():
-            self.run_check(check, state_topic)
-            STOP.wait(delay)
-
+            self.client.publish(state_topic, value, qos=1, retain=True); self.client.publish(state_topic.rsplit("/", 1)[0] + "/attributes", json.dumps(attrs), qos=1, retain=True); LOG.info("%s: %s", check["name"], "matched" if found else "not matched")
+        except requests.RequestException as error: LOG.warning("%s: request failed: %s", check.get("name", "unnamed"), error)
+        except Exception: LOG.exception("%s: check failed", check.get("name", "unnamed"))
     def start(self):
-        self.connect()
-        threads = []
-        for check in configured_checks(self.options):
-            if not validate_check(check):
-                LOG.error("Skipping invalid check: %r", check)
-                continue
-            topic = self.publish_discovery(check)
-            thread = threading.Thread(target=self.worker, args=(check, topic), name=slug(check["name"]), daemon=True)
-            thread.start()
-            threads.append(thread)
-        LOG.info("Started %d web keyword check(s)", len(threads))
+        self.connect(); start_server(self.store); LOG.info("Web form available through app ingress")
         while not STOP.wait(1):
-            pass
-        self.client.publish("web_keyword_sensor/status", "offline", qos=1, retain=True)
-        self.client.loop_stop()
-        self.client.disconnect()
-
+            now = time.monotonic(); current = set()
+            for check in self.store.get():
+                if not valid(check): continue
+                cid = check.setdefault("id", ident(check)); current.add(cid)
+                if cid not in self.known: self.known[cid] = self.discovery(check); self.due[cid] = 0
+                if self.due.get(cid, 0) <= now and cid not in self.running:
+                    self.running.add(cid)
+                    def task(item=check, ident_=cid):
+                        try: self.run(item, self.known[ident_])
+                        finally: self.running.discard(ident_); self.due[ident_] = time.monotonic() + int(item["interval"]) * UNITS[item["unit"]]
+                    threading.Thread(target=task, daemon=True).start()
+            for cid in set(self.known) - current:
+                self.known.pop(cid); self.due.pop(cid, None)
+        self.client.loop_stop(); self.client.disconnect()
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    try:
-        with open("/data/options.json", encoding="utf-8") as file:
-            options = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError) as err:
-        LOG.error("Unable to read add-on options: %s", err)
-        raise SystemExit(1)
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: STOP.set())
-    WebKeywordSensor(options).start()
-
-
-if __name__ == "__main__":
-    main()
+    with open("/data/options.json", encoding="utf-8") as file: options = json.load(file)
+    for sig in (signal.SIGTERM, signal.SIGINT): signal.signal(sig, lambda *_: STOP.set())
+    App(options).start()
+if __name__ == "__main__": main()

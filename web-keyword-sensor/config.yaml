@@ -6,6 +6,10 @@ url: https://github.com/example/web-keyword-sensor
 startup: services
 boot: auto
 init: false
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:text-search
+panel_title: Web Keyword Sensor
 arch:
   - amd64
   - aarch64
