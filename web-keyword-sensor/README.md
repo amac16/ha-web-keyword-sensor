@@ -10,19 +10,22 @@ entity type, interval, time unit, matching mode, and TLS setting.
    add-ons directory).
 2. Install and configure the app.
 3. Ensure the Home Assistant MQTT integration is connected to the same broker.
-4. Add checks in the app configuration, for example:
+4. Add checks in the app configuration as a JSON array, for example:
 
-```yaml
-checks:
-  - name: Example phrase
-    url: https://www.example.com
-    phrase: this string
-    entity_type: binary_sensor
-    interval: 15
-    unit: minutes
-    case_sensitive: false
-    verify_ssl: true
-    enabled: true
+```json
+[
+  {
+    "name": "Example phrase",
+    "url": "https://www.example.com",
+    "phrase": "this string",
+    "entity_type": "binary_sensor",
+    "interval": 15,
+    "unit": "minutes",
+    "case_sensitive": false,
+    "verify_ssl": true,
+    "enabled": true
+  }
+]
 ```
 
 The `binary_sensor` is `on` when the phrase occurs and `off` otherwise. A

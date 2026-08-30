@@ -50,6 +50,19 @@ def validate_check(check: dict) -> bool:
         return False
 
 
+def configured_checks(options: dict) -> list[dict]:
+    """Decode the JSON text field used for an arbitrary number of checks."""
+    checks = options.get("checks", "[]")
+    if isinstance(checks, list):
+        return checks
+    try:
+        decoded = json.loads(checks)
+        return decoded if isinstance(decoded, list) else []
+    except (TypeError, json.JSONDecodeError):
+        LOG.error("The checks option must contain a JSON array")
+        return []
+
+
 class WebKeywordSensor:
     def __init__(self, options: dict):
         self.options = options
@@ -142,7 +155,7 @@ class WebKeywordSensor:
     def start(self):
         self.connect()
         threads = []
-        for check in self.options.get("checks", []):
+        for check in configured_checks(self.options):
             if not validate_check(check):
                 LOG.error("Skipping invalid check: %r", check)
                 continue
