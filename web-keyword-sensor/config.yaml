@@ -1,5 +1,5 @@
 name: Web Keyword Sensor
-version: "1.3.4"
+version: "1.3.5"
 slug: web_keyword_sensor
 description: Create sensors from phrases found on web pages
 url: https://github.com/amac16/ha-web-keyword-sensor#readme
