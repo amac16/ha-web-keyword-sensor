@@ -33,7 +33,7 @@ button{background:#1976d2;color:#fff;border:0;border-radius:4px;cursor:pointer}.
 </style>
 <h1>Web Keyword Sensor</h1>
 <p>Manage page checks. Changes are saved immediately.</p><div id="list"></div>
-<div class="card"><h2>AI model integrations</h2><p>Keys are stored only in protected app storage. AI checks send page text to the selected provider.</p><div id="profiles"></div><form id="profile_form"><input id="profile_id" type="hidden"><label>Name<input id="profile_name" required></label><label>Provider<select id="profile_provider"><option value="openai">OpenAI</option><option value="google">Google Gemini</option><option value="anthropic">Anthropic Claude</option></select></label><label>Model ID<input id="profile_model" placeholder="e.g. gpt-4.1-mini" required></label><label>API key<input id="profile_key" type="password" autocomplete="new-password"><small>Required for new profiles; leave blank when editing to preserve the key.</small></label><button>Save AI profile</button></form></div>
+<div class="card"><h2>AI model integrations</h2><p>Keys are stored only in protected app storage. AI checks send page text to the selected provider.</p><div id="profiles"></div><form id="profile_form"><input id="profile_id" type="hidden"><label>Name<input id="profile_name" required></label><label>Provider<select id="profile_provider"><option value="openai">OpenAI</option><option value="google">Google Gemini</option><option value="anthropic">Anthropic Claude</option></select></label><label>Model ID<input id="profile_model" placeholder="e.g. gpt-4.1-mini" required></label><label>API key<input id="profile_key" type="password" autocomplete="new-password"><small>Required for new profiles; leave blank when editing to preserve the key.</small></label><button>Save AI profile</button> <button type="button" id="test_profile" onclick="testProfile()">Test provider</button> <span id="profile_test_status"></span></form></div>
 <div class="card"><h2 id="heading">Add check</h2><form id="form">
 <input id="id" type="hidden"><label>Name<input id="name" required></label>
 <label>URL<input id="url" type="url" required></label><label>Phrase (exact mode)<input id="phrase"></label>
@@ -76,6 +76,7 @@ function edit(c){$('id').value=c.id;ids.forEach(k=>$(k)[$(k).type==='checkbox'?'
 function reset(){$('form').reset();$('id').value='';$('time_from').value='00:00';$('time_to').value='23:00';$('auth_mode').value='basic';$('match_mode').value='literal';document.querySelectorAll('.day').forEach(x=>x.checked=true);$('heading').textContent='Add check';$('cancel').hidden=true;showBrowser();showContext()}
 async function del(id){if(confirm('Delete this check?')){await fetch('./api/checks/'+encodeURIComponent(id),{method:'DELETE'});load()}}
 async function delProfile(id){if(confirm('Delete this AI profile?')){await fetch('./api/ai-profiles/'+encodeURIComponent(id),{method:'DELETE'});loadProfiles()}}
+async function testProfile(){let b=$('test_profile');b.disabled=true;$('profile_test_status').textContent='Testing...';let p={id:$('profile_id').value||undefined,name:$('profile_name').value,provider:$('profile_provider').value,model:$('profile_model').value,api_key:$('profile_key').value};try{let r=await fetch('./api/ai-profiles/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});let x=await r.json();$('profile_test_status').textContent=r.ok?'Provider responded successfully':(x.error||'Provider test failed')}catch(e){$('profile_test_status').textContent='Provider test failed'}finally{b.disabled=false}}
 $('profile_form').onsubmit=async e=>{e.preventDefault();let p={id:$('profile_id').value||undefined,name:$('profile_name').value,provider:$('profile_provider').value,model:$('profile_model').value,api_key:$('profile_key').value};let r=await fetch('./api/ai-profiles',{method:p.id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});let x=await r.json();if(!r.ok)return alert(x.error||'Unable to save profile');$('profile_form').reset();loadProfiles()}
 $('form').onsubmit=async e=>{e.preventDefault();let c=Object.fromEntries(ids.map(k=>[k,$(k).type==='checkbox'?$(k).checked:$(k).value]));c.id=$('id').value||undefined;c.username=$('username').value;c.password=$('password').value;c.totp_secret=$('totp_secret').value;c.days=[...document.querySelectorAll('.day:checked')].map(x=>x.value);let saved=await (await fetch('./api/checks',{method:c.id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();if(c.auth_mode==='browser'&&c.login_url){edit(saved);$('id').value=saved.id;$('auth_mode').value='browser';showBrowser()}else reset();load()};
 async function browserAction(action,body={}){if(!browserSession)return alert('Start the browser first');let r=await fetch('./api/auth/'+browserSession+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let x=await r.json();if(!r.ok)return alert(x.error||'Browser action failed');if(x.image)$('browser_image').src='data:image/png;base64,'+x.image;load()}
@@ -139,6 +140,18 @@ class AIProfileStore:
     def get_public(self):
         with self.lock:
             return [{"id": x.get("id"), "name": x.get("name", x.get("id", "")), "provider": x.get("provider"), "model": x.get("model"), "enabled": x.get("enabled", True), "api_key_configured": bool(x.get("api_key"))} for x in self.profiles]
+    def for_test(self, profile):
+        if not isinstance(profile, dict): raise ValueError("profile must be an object")
+        with self.lock:
+            candidate = dict(profile)
+            old = next((x for x in self.profiles if x.get("id") == candidate.get("id")), {})
+            if not candidate.get("api_key"): candidate["api_key"] = old.get("api_key", "")
+        provider = str(candidate.get("provider", "")).lower()
+        if provider not in self.PROVIDERS: raise ValueError("unsupported AI provider")
+        if not candidate.get("model"): raise ValueError("model is required")
+        if not candidate.get("api_key"): raise ValueError("API key is required")
+        candidate["provider"] = provider
+        return candidate
     def put(self, profile):
         if not isinstance(profile, dict): raise ValueError("profile must be an object")
         with self.lock:
@@ -309,6 +322,9 @@ def start_server(store, browser_sessions=None, ai_profiles=None):
             try:
                 if path == "/api/checks":
                     check = self.body(); store.put(check); safe = next(x for x in store.get() if x.get("id") == check.get("id")); self.reply(safe, 201); return
+                if path == "/api/ai-profiles/test":
+                    from ai_providers import evaluate
+                    profile = ai_profiles.for_test(self.body()); evaluate(profile, "Return a valid JSON result confirming that this connection works.", "This is a connection test page.", 30); self.reply({"ok": True}); return
                 if path == "/api/ai-profiles":
                     profile = ai_profiles.put(self.body()); self.reply({"id": profile["id"], "name": profile["name"], "provider": profile["provider"], "model": profile["model"], "enabled": profile["enabled"], "api_key_configured": True}, 201); return
                 if path == "/api/auth/start": sid, image = browser_sessions.start(self.body().get("id")); self.reply({"session": sid, "image": image}); return

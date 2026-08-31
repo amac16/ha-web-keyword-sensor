@@ -47,7 +47,8 @@ no Home Assistant API token is required. The default MQTT host is
 Use the **AI model integrations** section to save one or more provider profiles
 with a provider (`openai`, `google`, or `anthropic`), model ID, and API key. Keys
 are stored in `/data/ai-profiles.json` with mode `0600` and are never returned
-to the browser. Each check can select `AI context match` and one enabled
+to the browser. Use **Test provider** before saving or while editing to verify
+the credentials and model. Each check can select `AI context match` and one enabled
 profile, then describe the information to find. The page text and request are
 sent to that provider; webpage text is treated as untrusted data.
 

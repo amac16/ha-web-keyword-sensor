@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.1
+
+- Added a **Test provider** button to verify an AI profile's provider, model,
+  and API key without saving or exposing the key.
+
 ## 1.6.0
 
 - Added AI context matching with OpenAI, Google Gemini, and Anthropic Claude
