@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.2
+
+- Styled the prompt expansion control as a compact hyperlink.
+- Added `...less` behavior to collapse expanded requests back to 250 characters.
+
 ## 1.7.1
 
 - Truncated long saved AI requests to 250 characters with a blue **more...**
