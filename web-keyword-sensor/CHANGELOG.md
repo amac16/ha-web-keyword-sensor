@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.3
+
+- Fixed editing existing checks by replacing fragile inline JSON click handlers
+  with safe event listeners and an in-memory check cache.
+
 ## 1.6.2
 
 - Updated OpenAI AI checks to use the current Responses API at
