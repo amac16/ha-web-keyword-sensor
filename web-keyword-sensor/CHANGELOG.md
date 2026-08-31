@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.8
+
+- Added a `None` authentication mode, selected by default for new checks.
+- Authentication-specific fields now appear only for the selected mode.
+
+## 1.6.7
+
+- Hid the AI profile form by default and added a compact **Add** button to
+  reveal it. Editing an existing profile still opens the form automatically.
+
 ## 1.6.6
 
 - Displayed each check's selected weekdays and daily start/end time in the
