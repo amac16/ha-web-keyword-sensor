@@ -6,7 +6,8 @@ from urllib.parse import urlparse
 import paho.mqtt.client as mqtt
 import pyotp
 import requests
-from web_ui import BrowserSessions, CheckStore, start_server
+from ai_providers import evaluate
+from web_ui import AIProfileStore, BrowserSessions, CheckStore, start_server
 
 LOG = logging.getLogger("web_keyword_sensor")
 STOP = threading.Event()
@@ -20,7 +21,8 @@ def slug(value): return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or 
 def ident(check): return f"{slug(check.get('name', 'web keyword'))}_{hashlib.sha1(str(check.get('url', '')).encode(), usedforsecurity=False).hexdigest()[:8]}"
 def valid(check):
     try:
-        p = urlparse(check["url"]); return p.scheme in ("http", "https") and bool(p.netloc) and bool(check["phrase"])
+        p = urlparse(check["url"]); phrase_ok = bool(check.get("phrase")) or (check.get("match_mode") == "ai_context" and bool(check.get("context_prompt")))
+        return p.scheme in ("http", "https") and bool(p.netloc) and phrase_ok
     except (KeyError, TypeError): return False
 def initial_checks(options):
     raw = options.get("checks", "[]")
@@ -46,7 +48,7 @@ def in_schedule(check):
 
 class App:
     def __init__(self, options):
-        self.options = options; self.store = CheckStore(initial_checks(options)); self.browser = BrowserSessions(self.store); self.running = set(); self.due = {}; self.known = {}; self.state_lock = threading.RLock()
+        self.options = options; self.store = CheckStore(initial_checks(options)); self.ai_profiles = AIProfileStore(); self.browser = BrowserSessions(self.store); self.running = set(); self.due = {}; self.known = {}; self.state_lock = threading.RLock(); self.ai_lock = threading.BoundedSemaphore(1)
         try: configured_workers = int(options.get("max_concurrent_checks", 2))
         except (TypeError, ValueError): configured_workers = 2
         self.max_workers = max(1, min(configured_workers, 8))
@@ -67,8 +69,9 @@ class App:
         self.client.connect_async(self.options.get("mqtt_host", "homeassistant.local"), int(self.options.get("mqtt_port", 1883)))
     def discovery(self, check):
         name = ident(check); base = f"web_keyword_sensor/{name}"; component = check["entity_type"]
-        config = {"name": check["name"], "unique_id": f"web_keyword_sensor_{name}", "state_topic": f"{base}/state", "availability_topic": "web_keyword_sensor/status", "payload_available": "online", "payload_not_available": "offline", "json_attributes_topic": f"{base}/attributes", "device": {"identifiers": ["web_keyword_sensor"], "name": "Web Keyword Sensor", "manufacturer": "Web Keyword Sensor"}}
+        config = {"name": check["name"], "unique_id": f"web_keyword_sensor_{name}", "state_topic": f"{base}/state", "availability_topic": f"{base}/availability", "payload_available": "online", "payload_not_available": "offline", "json_attributes_topic": f"{base}/attributes", "device": {"identifiers": ["web_keyword_sensor"], "name": "Web Keyword Sensor", "manufacturer": "Web Keyword Sensor"}}
         if component == "binary_sensor": config.update(payload_on="ON", payload_off="OFF")
+        elif check.get("match_mode") == "ai_context": config.update(icon="mdi:robot-search")
         else: config.update(unit_of_measurement="matches", icon="mdi:text-search")
         self.client.publish(f"{self.options.get('discovery_prefix', 'homeassistant').strip('/')}/{component}/{name}/config", json.dumps(config), qos=1, retain=True); return f"{base}/state"
     def run(self, check, state_topic):
@@ -80,9 +83,14 @@ class App:
             status = None
             if check.get("auth_mode", "basic") == "browser":
                 try: status, response_text = self.browser.fetch(check)
-                except Exception as error: self.auth_failure(check, str(error)); return
+                except Exception as error:
+                    if check.get("match_mode") == "ai_context": self.ai_unavailable(check, state_topic, "browser request failed")
+                    else: self.auth_failure(check, str(error))
+                    return
                 if status in (401, 403):
-                    self.auth_failure(check, f"browser session expired or invalid (HTTP {status})"); return
+                    if check.get("match_mode") == "ai_context": self.ai_unavailable(check, state_topic, f"browser session expired or invalid (HTTP {status})")
+                    else: self.auth_failure(check, f"browser session expired or invalid (HTTP {status})")
+                    return
                 if status >= 400: raise requests.HTTPError(f"browser request failed (HTTP {status})")
             else:
                 with requests.Session() as session:
@@ -104,12 +112,31 @@ class App:
                     if status in (401, 403):
                         self.auth_failure(check, f"credentials expired or invalid (HTTP {status})"); return
                     response.raise_for_status(); response_text = self.read_response(response, max_bytes)
-            found = check["phrase"] in text(response_text) if check.get("case_sensitive") else check["phrase"].casefold() in text(response_text).casefold()
-            value = ("ON" if found else "OFF") if check["entity_type"] == "binary_sensor" else ("1" if found else "0")
-            attrs = {"url": check["url"], "phrase": check["phrase"], "matched": found, "checked_at": int(time.time()), "http_status": status if check.get("auth_mode", "basic") == "browser" else response.status_code}
-            self.client.publish(state_topic, value, qos=1, retain=True); self.client.publish(state_topic.rsplit("/", 1)[0] + "/attributes", json.dumps(attrs), qos=1, retain=True); LOG.info("%s: %s", check["name"], "matched" if found else "not matched")
-        except requests.RequestException as error: LOG.warning("%s: request failed: %s", check.get("name", "unnamed"), error)
-        except Exception: LOG.exception("%s: check failed", check.get("name", "unnamed"))
+            page_text = text(response_text)
+            if check.get("match_mode") == "ai_context":
+                profile = next((x for x in self.ai_profiles.get_runtime() if x.get("id") == check.get("ai_profile_id") and x.get("enabled", True)), None)
+                if not profile: self.ai_unavailable(check, state_topic, "AI profile is missing or disabled"); return
+                with self.ai_lock:
+                    result = evaluate(profile, check.get("context_prompt", ""), page_text, profile.get("timeout", self.options.get("request_timeout", 30)))
+                found = result["match"]
+                value = ("ON" if found else "OFF") if check["entity_type"] == "binary_sensor" else (result["summary"] or ("Relevant information found." if found else "No relevant information found."))
+                attrs = {"url": check["url"], "match_mode": "ai_context", "matched": found, "summary": result["summary"], "findings": result["findings"], "checked_at": int(time.time()), "http_status": status, "ai_profile": profile.get("name", profile.get("id")), "ai_model": profile.get("model")}
+            else:
+                found = check["phrase"] in page_text if check.get("case_sensitive") else check["phrase"].casefold() in page_text.casefold()
+                value = ("ON" if found else "OFF") if check["entity_type"] == "binary_sensor" else ("1" if found else "0")
+                attrs = {"url": check["url"], "phrase": check["phrase"], "matched": found, "checked_at": int(time.time()), "http_status": status}
+            base = state_topic.rsplit("/", 1)[0]
+            self.client.publish(base + "/availability", "online", qos=1, retain=True); self.client.publish(state_topic, value, qos=1, retain=True); self.client.publish(base + "/attributes", json.dumps(attrs), qos=1, retain=True); LOG.info("%s: %s", check["name"], "matched" if found else "not matched")
+        except requests.RequestException as error:
+            if check.get("match_mode") == "ai_context": self.ai_unavailable(check, state_topic, "provider request failed")
+            LOG.warning("%s: request failed: %s", check.get("name", "unnamed"), error)
+        except Exception as error:
+            if check.get("match_mode") == "ai_context": self.ai_unavailable(check, state_topic, "AI evaluation failed")
+            LOG.exception("%s: check failed", check.get("name", "unnamed"))
+    def ai_unavailable(self, check, state_topic, reason):
+        self.client.publish(state_topic.rsplit("/", 1)[0] + "/availability", "offline", qos=1, retain=True)
+        check["auth_status"] = "AI unavailable: " + reason
+        self.store.put(check)
     @staticmethod
     def read_response(response, max_bytes):
         data = bytearray()
@@ -128,7 +155,7 @@ class App:
                 requests.post("http://supervisor/core/api/services/persistent_notification/create", headers={"Authorization": f"Bearer {token}"}, json={"title": "Web Keyword Sensor authentication failure", "message": f"Authentication failed for {check.get('name', 'unnamed')}: {reason}"}, timeout=10)
             except requests.RequestException: LOG.warning("Unable to create Home Assistant notification")
     def start(self):
-        self.connect(); start_server(self.store, self.browser); LOG.info("Web form available through app ingress")
+        self.connect(); start_server(self.store, self.browser, self.ai_profiles); LOG.info("Web form available through app ingress")
         while not STOP.wait(1):
             now = time.monotonic(); current = set()
             for check in self.store.get_runtime():

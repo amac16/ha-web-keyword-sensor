@@ -42,6 +42,22 @@ windows such as 22:00 to 06:00 are supported. The app uses MQTT discovery, so
 no Home Assistant API token is required. The default MQTT host is
 `homeassistant.local`; set broker credentials if needed.
 
+## AI context matching
+
+Use the **AI model integrations** section to save one or more provider profiles
+with a provider (`openai`, `google`, or `anthropic`), model ID, and API key. Keys
+are stored in `/data/ai-profiles.json` with mode `0600` and are never returned
+to the browser. Each check can select `AI context match` and one enabled
+profile, then describe the information to find. The page text and request are
+sent to that provider; webpage text is treated as untrusted data.
+
+AI binary sensors publish `ON`/`OFF`. AI text sensors publish the model's short
+summary as their state and put bounded findings in MQTT attributes. Provider
+errors mark the entity unavailable without replacing its last state. AI checks
+are serialized and use the same request timeout and page-size limits as normal
+checks, so model use should be scheduled at a reasonable interval. External
+AI calls may incur provider charges and may disclose private page contents.
+
 ## Authentication
 
 Each check can optionally define a login URL, username, password, TOTP secret,

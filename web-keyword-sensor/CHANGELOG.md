@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.6.0
+
+- Added AI context matching with OpenAI, Google Gemini, and Anthropic Claude
+  profiles.
+- Added protected multi-profile storage, model selection per check, bounded AI
+  input/output, and unavailable-on-error behavior that preserves the last state.
+- AI text sensors publish a short summary with structured findings as attributes.
+
+## 1.5.0
+
+- Bound concurrent checks with a small worker pool instead of creating an
+  unbounded thread per check.
+- Keep MQTT and the ingress UI available while the broker is unavailable.
+- Bound HTTP response memory, close HTTP sessions, and harden invalid intervals.
+- Add browser-operation timeouts, expired-session cleanup, and graceful browser
+  shutdown so Chromium cannot accumulate across retries.
+
 ## 1.4.2
 
 - Use Playwright's Async API on a dedicated event loop for browser SSO.
@@ -38,11 +55,3 @@
 
 - Initial release.
 - Added MQTT discovery sensors for webpage phrase matching.
-## 1.5.0
-
-- Bound concurrent checks with a small worker pool instead of creating an
-  unbounded thread per check.
-- Keep MQTT and the ingress UI available while the broker is unavailable.
-- Bound HTTP response memory, close HTTP sessions, and harden invalid intervals.
-- Add browser-operation timeouts, expired-session cleanup, and graceful browser
-  shutdown so Chromium cannot accumulate across retries.

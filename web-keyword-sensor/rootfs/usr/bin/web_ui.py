@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -15,6 +16,7 @@ from urllib.parse import unquote, urlparse
 LOG = logging.getLogger("web_keyword_sensor.ui")
 
 PATH = Path("/data/checks.json")
+AI_PATH = Path("/data/ai-profiles.json")
 AUTH_DIR = Path("/data/browser-auth")
 HTML = '''<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -31,10 +33,13 @@ button{background:#1976d2;color:#fff;border:0;border-radius:4px;cursor:pointer}.
 </style>
 <h1>Web Keyword Sensor</h1>
 <p>Manage page checks. Changes are saved immediately.</p><div id="list"></div>
+<div class="card"><h2>AI model integrations</h2><p>Keys are stored only in protected app storage. AI checks send page text to the selected provider.</p><div id="profiles"></div><form id="profile_form"><input id="profile_id" type="hidden"><label>Name<input id="profile_name" required></label><label>Provider<select id="profile_provider"><option value="openai">OpenAI</option><option value="google">Google Gemini</option><option value="anthropic">Anthropic Claude</option></select></label><label>Model ID<input id="profile_model" placeholder="e.g. gpt-4.1-mini" required></label><label>API key<input id="profile_key" type="password" autocomplete="new-password"><small>Required for new profiles; leave blank when editing to preserve the key.</small></label><button>Save AI profile</button></form></div>
 <div class="card"><h2 id="heading">Add check</h2><form id="form">
 <input id="id" type="hidden"><label>Name<input id="name" required></label>
-<label>URL<input id="url" type="url" required></label><label>Phrase<input id="phrase" required></label>
+<label>URL<input id="url" type="url" required></label><label>Phrase (exact mode)<input id="phrase"></label>
 <label>Entity type<select id="entity_type"><option value="binary_sensor">Binary sensor</option><option value="sensor">Sensor</option></select></label>
+<label>Match mode<select id="match_mode"><option value="literal">Exact phrase</option><option value="ai_context">AI context match</option></select></label>
+<label class="context hidden">AI model<select id="ai_profile_id"></select></label><label class="context hidden" style="grid-column:1/-1">What to look for<textarea id="context_prompt" rows="4" placeholder="Describe the information you want found on this page..."></textarea></label>
 <label>Interval<input id="interval" type="number" min="1" max="31536000" value="15" required></label>
 <label>Unit<select id="unit"><option>seconds</option><option selected>minutes</option><option>hours</option><option>days</option><option>weeks</option></select></label>
 <label>From<select id="time_from"></select></label><label>To<select id="time_to"></select></label>
@@ -56,16 +61,22 @@ button{background:#1976d2;color:#fff;border:0;border-radius:4px;cursor:pointer}.
 <p>Click the screenshot to click the remote page.</p><img id="browser_image" alt="Browser login screenshot"></div>
 </form></div>
 <script>
-const ids=['name','url','phrase','entity_type','interval','unit','time_from','time_to','login_url','auth_mode','username_field','password_field','totp_field','success_text','case_sensitive','verify_ssl','enabled'];
+const ids=['name','url','phrase','entity_type','match_mode','ai_profile_id','context_prompt','interval','unit','time_from','time_to','login_url','auth_mode','username_field','password_field','totp_field','success_text','case_sensitive','verify_ssl','enabled'];
 const $=x=>document.getElementById(x);let browserSession='';
 const esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 for(const id of ['time_from','time_to'])for(let h=0;h<24;h++){let o=document.createElement('option');o.value=String(h).padStart(2,'0')+':00';o.textContent=o.value;$(id).append(o)}
 function showBrowser(){$('browser').classList.toggle('hidden',$('auth_mode').value!=='browser')}
 $('auth_mode').onchange=showBrowser;
-async function load(){const r=await fetch('./api/checks');const x=await r.json();$('list').innerHTML=x.map(c=>`<div class="card"><h2>${esc(c.name)}</h2><p>${esc(c.entity_type)} · every ${c.interval} ${esc(c.unit)} · ${esc(c.time_from||'00:00')}–${esc(c.time_to||'23:00')} · ${c.enabled?'enabled':'disabled'}</p><p>${esc(c.phrase)}<br>${esc(c.url)}<br>${c.auth_mode==='browser'?'Browser SSO':'Basic login'} · <span class="${String(c.auth_status||'').startsWith('Authentication failed')?'auth-failure':''}">${esc(c.auth_status||'Not tested')}</span></p><button onclick='edit(${JSON.stringify(c)})'>Edit</button> <button class="delete" onclick='del("${esc(c.id)}")'>Delete</button></div>`).join('')||'<p>No checks configured.</p>'}
-function edit(c){$('id').value=c.id;ids.forEach(k=>$(k)[$(k).type==='checkbox'?'checked':'value']=c[k]??$(k).value);$('username').value='';$('password').value='';$('totp_secret').value='';document.querySelectorAll('.day').forEach(x=>x.checked=(c.days||[]).includes(x.value));$('heading').textContent='Edit check';$('cancel').hidden=false;showBrowser();scrollTo(0,document.body.scrollHeight)}
-function reset(){$('form').reset();$('id').value='';$('time_from').value='00:00';$('time_to').value='23:00';$('auth_mode').value='basic';document.querySelectorAll('.day').forEach(x=>x.checked=true);$('heading').textContent='Add check';$('cancel').hidden=true;showBrowser()}
+function showContext(){document.querySelectorAll('.context').forEach(x=>x.classList.toggle('hidden',$('match_mode').value!=='ai_context'))}
+$('match_mode').onchange=showContext;
+async function loadProfiles(){const x=await (await fetch('./api/ai-profiles')).json();$('ai_profile_id').innerHTML=x.filter(p=>p.enabled).map(p=>`<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.provider)} / ${esc(p.model)})</option>`).join('')||'<option value="">No enabled AI profiles</option>';$('profiles').innerHTML=x.map(p=>`<p>${esc(p.name)} · ${esc(p.provider)} / ${esc(p.model)} · ${p.api_key_configured?'key configured':'missing key'} <button type="button" onclick='editProfile(${JSON.stringify(p)})'>Edit</button> <button type="button" class="delete" onclick='delProfile("${esc(p.id)}")'>Delete</button></p>`).join('')||'<p>No profiles configured.</p>';showContext()}
+function editProfile(p){$('profile_id').value=p.id;$('profile_name').value=p.name;$('profile_provider').value=p.provider;$('profile_model').value=p.model;$('profile_key').value='';scrollTo(0,0)}
+async function load(){const r=await fetch('./api/checks');const x=await r.json();$('list').innerHTML=x.map(c=>`<div class="card"><h2>${esc(c.name)}</h2><p>${esc(c.entity_type)} · ${c.match_mode==='ai_context'?'AI context':'exact phrase'} · every ${c.interval} ${esc(c.unit)} · ${c.enabled?'enabled':'disabled'}</p><p>${esc(c.context_prompt||c.phrase)}<br>${esc(c.url)}<br><span class="${String(c.auth_status||'').startsWith('Authentication failed')?'auth-failure':''}">${esc(c.auth_status||'Not tested')}</span></p><button onclick='edit(${JSON.stringify(c)})'>Edit</button> <button class="delete" onclick='del("${esc(c.id)}")'>Delete</button></div>`).join('')||'<p>No checks configured.</p>';loadProfiles()}
+function edit(c){$('id').value=c.id;ids.forEach(k=>$(k)[$(k).type==='checkbox'?'checked':'value']=c[k]??$(k).value);$('username').value='';$('password').value='';$('totp_secret').value='';document.querySelectorAll('.day').forEach(x=>x.checked=(c.days||[]).includes(x.value));$('heading').textContent='Edit check';$('cancel').hidden=false;showBrowser();showContext();scrollTo(0,document.body.scrollHeight)}
+function reset(){$('form').reset();$('id').value='';$('time_from').value='00:00';$('time_to').value='23:00';$('auth_mode').value='basic';$('match_mode').value='literal';document.querySelectorAll('.day').forEach(x=>x.checked=true);$('heading').textContent='Add check';$('cancel').hidden=true;showBrowser();showContext()}
 async function del(id){if(confirm('Delete this check?')){await fetch('./api/checks/'+encodeURIComponent(id),{method:'DELETE'});load()}}
+async function delProfile(id){if(confirm('Delete this AI profile?')){await fetch('./api/ai-profiles/'+encodeURIComponent(id),{method:'DELETE'});loadProfiles()}}
+$('profile_form').onsubmit=async e=>{e.preventDefault();let p={id:$('profile_id').value||undefined,name:$('profile_name').value,provider:$('profile_provider').value,model:$('profile_model').value,api_key:$('profile_key').value};let r=await fetch('./api/ai-profiles',{method:p.id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});let x=await r.json();if(!r.ok)return alert(x.error||'Unable to save profile');$('profile_form').reset();loadProfiles()}
 $('form').onsubmit=async e=>{e.preventDefault();let c=Object.fromEntries(ids.map(k=>[k,$(k).type==='checkbox'?$(k).checked:$(k).value]));c.id=$('id').value||undefined;c.username=$('username').value;c.password=$('password').value;c.totp_secret=$('totp_secret').value;c.days=[...document.querySelectorAll('.day:checked')].map(x=>x.value);let saved=await (await fetch('./api/checks',{method:c.id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();if(c.auth_mode==='browser'&&c.login_url){edit(saved);$('id').value=saved.id;$('auth_mode').value='browser';showBrowser()}else reset();load()};
 async function browserAction(action,body={}){if(!browserSession)return alert('Start the browser first');let r=await fetch('./api/auth/'+browserSession+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let x=await r.json();if(!r.ok)return alert(x.error||'Browser action failed');if(x.image)$('browser_image').src='data:image/png;base64,'+x.image;load()}
 async function startBrowser(){let r=await fetch('./api/auth/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:$('id').value})});let x=await r.json();if(!r.ok)return alert(x.error||'Unable to start browser');browserSession=x.session;$('browser_image').src='data:image/png;base64,'+x.image}
@@ -100,8 +111,8 @@ class CheckStore:
             old = next((x for x in self.checks if x.get("id") == check.get("id")), {})
             for secret in ("username", "password", "totp_secret"):
                 if not check.get(secret): check[secret] = old.get(secret, "")
-            if not check.get("name") or not check.get("url") or not check.get("phrase"):
-                raise ValueError("name, URL, and phrase are required")
+            if not check.get("name") or not check.get("url") or (not check.get("phrase") and not (check.get("match_mode") == "ai_context" and check.get("context_prompt"))):
+                raise ValueError("name, URL, and phrase or AI request are required")
             replacing = any(x.get("id") == check.get("id") for x in self.checks)
             if not replacing and len(self.checks) >= 100: raise ValueError("maximum of 100 checks reached")
             self.checks = [check if x.get("id") == check.get("id") else x for x in self.checks]
@@ -109,6 +120,48 @@ class CheckStore:
             self.save()
     def delete(self, ident):
         with self.lock: self.checks = [x for x in self.checks if x.get("id") != ident]; self.save()
+
+
+class AIProfileStore:
+    PROVIDERS = ("openai", "google", "anthropic")
+    def __init__(self):
+        self.lock = threading.RLock()
+        try: self.profiles = json.loads(AI_PATH.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError): self.profiles = []
+        if not isinstance(self.profiles, list): self.profiles = []
+        if AI_PATH.exists(): AI_PATH.chmod(0o600)
+    def save(self):
+        temporary = AI_PATH.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(self.profiles, indent=2) + "\n", encoding="utf-8")
+        temporary.chmod(0o600); os.replace(temporary, AI_PATH)
+    def get_runtime(self):
+        with self.lock: return [dict(x) for x in self.profiles]
+    def get_public(self):
+        with self.lock:
+            return [{"id": x.get("id"), "name": x.get("name", x.get("id", "")), "provider": x.get("provider"), "model": x.get("model"), "enabled": x.get("enabled", True), "api_key_configured": bool(x.get("api_key"))} for x in self.profiles]
+    def put(self, profile):
+        if not isinstance(profile, dict): raise ValueError("profile must be an object")
+        with self.lock:
+            ident = str(profile.get("id", "")).strip() or uuid.uuid4().hex
+            if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", ident): raise ValueError("profile ID must use letters, numbers, _ or -")
+            provider = str(profile.get("provider", "")).lower()
+            if provider not in self.PROVIDERS: raise ValueError("unsupported AI provider")
+            model = str(profile.get("model", "")).strip()
+            if not model or len(model) > 128: raise ValueError("model is required")
+            old = next((x for x in self.profiles if x.get("id") == ident), {})
+            profile = dict(profile); profile["id"] = ident; profile["provider"] = provider; profile["model"] = model
+            if not profile.get("api_key"): profile["api_key"] = old.get("api_key", "")
+            if not profile["api_key"]: raise ValueError("API key is required")
+            profile["name"] = str(profile.get("name") or ident)[:80]
+            profile["enabled"] = bool(profile.get("enabled", True))
+            profile["endpoint"] = str(profile.get("endpoint", ""))[:256]
+            replacing = any(x.get("id") == ident for x in self.profiles)
+            if not replacing and len(self.profiles) >= 20: raise ValueError("maximum of 20 AI profiles reached")
+            self.profiles = [profile if x.get("id") == ident else x for x in self.profiles]
+            if not replacing: self.profiles.append(profile)
+            self.save(); return profile
+    def delete(self, ident):
+        with self.lock: self.profiles = [x for x in self.profiles if x.get("id") != ident]; self.save()
 
 class BrowserSessions:
     def __init__(self, store):
@@ -233,7 +286,7 @@ def notify_auth_failure(check, reason):
         requests.post("http://supervisor/core/api/services/persistent_notification/create", headers={"Authorization": "Bearer " + token}, json={"title": "Web Keyword Sensor authentication failure", "message": "Authentication failed for %s: %s" % (check.get("name", "unnamed"), reason)}, timeout=10)
     except Exception: pass
 
-def start_server(store, browser_sessions=None):
+def start_server(store, browser_sessions=None, ai_profiles=None):
     if browser_sessions is None: browser_sessions = BrowserSessions(store)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args): pass
@@ -249,11 +302,15 @@ def start_server(store, browser_sessions=None):
             if path in ("/", ""):
                 data = HTML.encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
             elif path == "/api/checks": self.reply(store.get())
+            elif path == "/api/ai-profiles": self.reply(ai_profiles.get_public() if ai_profiles else [])
             else: self.send_error(404)
         def do_POST(self):
             path = urlparse(self.path).path
             try:
-                if path == "/api/checks": check = self.body(); store.put(check); self.reply(check, 201); return
+                if path == "/api/checks":
+                    check = self.body(); store.put(check); safe = next(x for x in store.get() if x.get("id") == check.get("id")); self.reply(safe, 201); return
+                if path == "/api/ai-profiles":
+                    profile = ai_profiles.put(self.body()); self.reply({"id": profile["id"], "name": profile["name"], "provider": profile["provider"], "model": profile["model"], "enabled": profile["enabled"], "api_key_configured": True}, 201); return
                 if path == "/api/auth/start": sid, image = browser_sessions.start(self.body().get("id")); self.reply({"session": sid, "image": image}); return
                 parts = path.split("/")
                 if len(parts) == 5 and parts[1:3] == ["api", "auth"]:
@@ -269,10 +326,20 @@ def start_server(store, browser_sessions=None):
                         if check: notify_auth_failure(check, error); store.put(check)
                 self.error(error)
         def do_PUT(self):
-            if urlparse(self.path).path != "/api/checks": self.send_error(404); return
-            try: check = self.body(); store.put(check); self.reply(check)
+            path = urlparse(self.path).path
+            if path == "/api/ai-profiles":
+                try:
+                    profile = ai_profiles.put(self.body()); self.reply({"id": profile["id"], "name": profile["name"], "provider": profile["provider"], "model": profile["model"], "enabled": profile["enabled"], "api_key_configured": True})
+                except Exception as error: self.error(error)
+                return
+            if path != "/api/checks": self.send_error(404); return
+            try:
+                check = self.body(); store.put(check); self.reply(next(x for x in store.get() if x.get("id") == check.get("id")))
             except (ValueError, TypeError): self.send_error(400)
         def do_DELETE(self):
+            path = urlparse(self.path).path
+            if path.startswith("/api/ai-profiles/"):
+                ai_profiles.delete(unquote(path.split("/", 3)[3])); self.reply({"ok": True}); return
             prefix = "/api/checks/"; path = urlparse(self.path).path
             if not path.startswith(prefix): self.send_error(404); return
             store.delete(unquote(path[len(prefix):])); self.reply({"ok": True})

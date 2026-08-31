@@ -5,7 +5,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir --disable-pip-version-check \
-    paho-mqtt==2.1.0 requests==2.32.4 pyotp==2.9.0 playwright==1.52.0
+    paho-mqtt==2.1.0 requests==2.32.4 pyotp==2.9.0 playwright==1.52.0 'anthropic>=1.0,<2.0'
 
 COPY rootfs /
 RUN chmod a+x /usr/bin/web-keyword-sensor /usr/bin/web_ui.py
