@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.4
+
+- Added a **Test** button beside each saved check to run it immediately.
+- Test results return the same entity state and safe attributes that MQTT
+  discovery receives, while failures are reported without fabricating a state.
+
 ## 1.6.3
 
 - Fixed editing existing checks by replacing fragile inline JSON click handlers

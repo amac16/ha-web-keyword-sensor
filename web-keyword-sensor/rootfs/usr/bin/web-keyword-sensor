@@ -75,7 +75,7 @@ class App:
         else: config.update(unit_of_measurement="matches", icon="mdi:text-search")
         self.client.publish(f"{self.options.get('discovery_prefix', 'homeassistant').strip('/')}/{component}/{name}/config", json.dumps(config), qos=1, retain=True); return f"{base}/state"
     def run(self, check, state_topic):
-        if not check.get("enabled", True): return
+        if not check.get("enabled", True): return {"ok": False, "error": "check is disabled"}
         try:
             headers = {"User-Agent": "Home Assistant Web Keyword Sensor/1.0"}; headers.update(check.get("headers") or {})
             timeout = max(5, min(int(self.options.get("request_timeout", 30)), 120)); verify = check.get("verify_ssl", True)
@@ -86,17 +86,17 @@ class App:
                 except Exception as error:
                     if check.get("match_mode") == "ai_context": self.ai_unavailable(check, state_topic, "browser request failed")
                     else: self.auth_failure(check, str(error))
-                    return
+                    return {"ok": False, "error": str(error)[:300]}
                 if status in (401, 403):
                     if check.get("match_mode") == "ai_context": self.ai_unavailable(check, state_topic, f"browser session expired or invalid (HTTP {status})")
                     else: self.auth_failure(check, f"browser session expired or invalid (HTTP {status})")
-                    return
+                    return {"ok": False, "error": "authentication failed"}
                 if status >= 400: raise requests.HTTPError(f"browser request failed (HTTP {status})")
             else:
                 with requests.Session() as session:
                     if check.get("login_url"):
                         if not check.get("username") or not check.get("password"):
-                            self.auth_failure(check, "credentials are missing"); return
+                            self.auth_failure(check, "credentials are missing"); return {"ok": False, "error": "credentials are missing"}
                         login = {check.get("username_field", "username"): check["username"], check.get("password_field", "password"): check["password"]}
                         if check.get("totp_secret"):
                             login[check.get("totp_field", "totp")] = pyotp.TOTP(check["totp_secret"]).now()
@@ -104,18 +104,18 @@ class App:
                         success_text = check.get("success_text")
                         auth_body = self.read_response(auth_response, max_bytes)
                         if auth_response.status_code >= 400 or (success_text and success_text not in auth_body):
-                            self.auth_failure(check, f"login rejected (HTTP {auth_response.status_code})"); return
+                            self.auth_failure(check, f"login rejected (HTTP {auth_response.status_code})"); return {"ok": False, "error": "login rejected"}
                         check["auth_status"] = "Credentials successful"
                         self.store.put(check)
                     response = session.get(check["url"], headers=headers, timeout=timeout, verify=verify, stream=True)
                     status = response.status_code
                     if status in (401, 403):
-                        self.auth_failure(check, f"credentials expired or invalid (HTTP {status})"); return
+                        self.auth_failure(check, f"credentials expired or invalid (HTTP {status})"); return {"ok": False, "error": "credentials expired or invalid"}
                     response.raise_for_status(); response_text = self.read_response(response, max_bytes)
             page_text = text(response_text)
             if check.get("match_mode") == "ai_context":
                 profile = next((x for x in self.ai_profiles.get_runtime() if x.get("id") == check.get("ai_profile_id") and x.get("enabled", True)), None)
-                if not profile: self.ai_unavailable(check, state_topic, "AI profile is missing or disabled"); return
+                if not profile: self.ai_unavailable(check, state_topic, "AI profile is missing or disabled"); return {"ok": False, "error": "AI profile is missing or disabled"}
                 with self.ai_lock:
                     result = evaluate(profile, check.get("context_prompt", ""), page_text, profile.get("timeout", self.options.get("request_timeout", 30)))
                 found = result["match"]
@@ -127,16 +127,31 @@ class App:
                 attrs = {"url": check["url"], "phrase": check["phrase"], "matched": found, "checked_at": int(time.time()), "http_status": status}
             base = state_topic.rsplit("/", 1)[0]
             self.client.publish(base + "/availability", "online", qos=1, retain=True); self.client.publish(state_topic, value, qos=1, retain=True); self.client.publish(base + "/attributes", json.dumps(attrs), qos=1, retain=True); LOG.info("%s: %s", check["name"], "matched" if found else "not matched")
+            return {"ok": True, "state": value, "attributes": attrs}
         except requests.RequestException as error:
             if check.get("match_mode") == "ai_context": self.ai_unavailable(check, state_topic, "provider request failed")
             LOG.warning("%s: request failed: %s", check.get("name", "unnamed"), error)
+            return {"ok": False, "error": "request failed"}
         except Exception as error:
             if check.get("match_mode") == "ai_context": self.ai_unavailable(check, state_topic, "AI evaluation failed")
             LOG.exception("%s: check failed", check.get("name", "unnamed"))
+            return {"ok": False, "error": "check failed"}
     def ai_unavailable(self, check, state_topic, reason):
         self.client.publish(state_topic.rsplit("/", 1)[0] + "/availability", "offline", qos=1, retain=True)
         check["auth_status"] = "AI unavailable: " + reason
         self.store.put(check)
+    def test_check(self, ident_):
+        check = next((x for x in self.store.get_runtime() if x.get("id") == ident_), None)
+        if not check or not valid(check): return {"ok": False, "error": "check is missing or invalid"}
+        with self.state_lock:
+            if ident_ in self.running: return {"ok": False, "error": "check is already running"}
+            if ident_ not in self.known:
+                try: self.known[ident_] = self.discovery(check)
+                except Exception: return {"ok": False, "error": "unable to publish discovery"}
+            self.running.add(ident_)
+        try: return self.run(check, self.known[ident_])
+        finally:
+            with self.state_lock: self.running.discard(ident_)
     @staticmethod
     def read_response(response, max_bytes):
         data = bytearray()
@@ -155,7 +170,7 @@ class App:
                 requests.post("http://supervisor/core/api/services/persistent_notification/create", headers={"Authorization": f"Bearer {token}"}, json={"title": "Web Keyword Sensor authentication failure", "message": f"Authentication failed for {check.get('name', 'unnamed')}: {reason}"}, timeout=10)
             except requests.RequestException: LOG.warning("Unable to create Home Assistant notification")
     def start(self):
-        self.connect(); start_server(self.store, self.browser, self.ai_profiles); LOG.info("Web form available through app ingress")
+        self.connect(); start_server(self.store, self.browser, self.ai_profiles, self.test_check); LOG.info("Web form available through app ingress")
         while not STOP.wait(1):
             now = time.monotonic(); current = set()
             for check in self.store.get_runtime():

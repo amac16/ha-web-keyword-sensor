@@ -52,6 +52,11 @@ the credentials and model. Each check can select `AI context match` and one enab
 profile, then describe the information to find. The page text and request are
 sent to that provider; webpage text is treated as untrusted data.
 
+Each saved check has a **Test** button. It runs the check immediately, publishes
+the normal MQTT state, and displays the resulting state and match value in the
+management page. A failed test reports an error instead of publishing a false
+negative result.
+
 AI binary sensors publish `ON`/`OFF`. AI text sensors publish the model's short
 summary as their state and put bounded findings in MQTT attributes. Provider
 errors mark the entity unavailable without replacing its last state. AI checks
