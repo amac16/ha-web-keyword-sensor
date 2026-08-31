@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.9
+
+- Increased OpenAI Responses output budget and set low reasoning effort for
+  reasoning models, preventing short classification results from ending with
+  `max_output_tokens` before JSON is returned.
+
 ## 1.6.8
 
 - Added a `None` authentication mode, selected by default for new checks.
