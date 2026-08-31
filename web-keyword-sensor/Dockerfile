@@ -1,8 +1,8 @@
-FROM ghcr.io/home-assistant/base:latest
+FROM python:3.13-alpine
 
-RUN apk add --no-cache ca-certificates chromium python3 py3-pip py3-greenlet
-RUN python3 -m pip install --break-system-packages --no-cache-dir --disable-pip-version-check paho-mqtt==2.1.0 requests==2.32.4 pyotp==2.9.0 pyee==13.0.0 --no-deps \
-    && python3 -m pip install --break-system-packages --no-cache-dir --disable-pip-version-check --index-url https://pypi.org/simple playwright==1.62.0 --no-deps
+RUN apk add --no-cache ca-certificates chromium build-base
+RUN pip install --no-cache-dir --disable-pip-version-check paho-mqtt==2.1.0 requests==2.32.4 pyotp==2.9.0 playwright==1.52.0 \
+    && apk del build-base
 
 COPY rootfs /
 RUN chmod a+x /usr/bin/web-keyword-sensor /usr/bin/web_ui.py
