@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -98,8 +99,9 @@ class CheckStore:
         with self.lock: self.checks = [x for x in self.checks if x.get("id") != ident]; self.save()
 
 class BrowserSessions:
-    def __init__(self, store): self.store, self.sessions, self.authenticated, self.lock = store, {}, {}, threading.RLock()
-    def start(self, ident):
+    def __init__(self, store): self.store, self.sessions, self.authenticated, self.lock, self.executor = store, {}, {}, threading.RLock(), ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
+    def start(self, ident): return self.executor.submit(self._start, ident).result()
+    def _start(self, ident):
         check = next((x for x in self.store.get_runtime() if x.get("id") == ident), None)
         if not check or check.get("auth_mode") != "browser" or not check.get("login_url"): raise ValueError("Save a browser SSO check with a login URL first")
         try:
@@ -122,7 +124,8 @@ class BrowserSessions:
     def close(self, sid):
         with self.lock: session = self.sessions.pop(sid, None)
         if session: session["browser"].close(); session["pw"].stop()
-    def finish(self, sid):
+    def finish(self, sid): return self.executor.submit(self._finish, sid).result()
+    def _finish(self, sid):
         session = self.get(sid)
         with session["lock"]:
             response = session["page"].goto(session["check"]["url"], wait_until="domcontentloaded", timeout=30000)
@@ -135,18 +138,29 @@ class BrowserSessions:
             session["check"]["auth_status"] = "Browser SSO successful"; self.store.put(session["check"])
             with self.lock: self.authenticated[session["check"]["id"]] = session
             return self.image(session)
-    def fetch(self, check):
+    def fetch(self, check): return self.executor.submit(self._fetch, check).result()
+    def _fetch(self, check):
         with self.lock: session = self.authenticated.get(check.get("id"))
         if not session:
             state_path = AUTH_DIR / f"{check.get('id')}.json"
             if not state_path.exists(): raise ValueError("browser SSO has not been completed")
-            sid, _ = self.start(check.get("id"))
+            sid, _ = self._start(check.get("id"))
             with self.lock: session = self.sessions[sid]
             with self.lock: self.authenticated[check.get("id")] = session
         with session["lock"]:
             response = session["page"].goto(check["url"], wait_until="domcontentloaded", timeout=30000)
             if not response: raise ValueError("browser did not return a response")
             return response.status, session["page"].content()
+    def action(self, sid, action, data): return self.executor.submit(self._action, sid, action, data).result()
+    def _action(self, sid, action, data):
+        session = self.get(sid)
+        with session["lock"]:
+            if action == "click":
+                scale = float(data.get("scale", 1)); session["page"].mouse.click(float(data["x"]) * scale, float(data["y"]) * scale)
+            elif action == "type": session["page"].keyboard.type(str(data.get("text", "")))
+            elif action == "finish": return self._finish(sid)
+            else: raise ValueError("Unknown browser action")
+            return self.image(session)
 
 def notify_auth_failure(check, reason):
     check["auth_status"] = "Authentication failed: " + str(reason)
@@ -178,15 +192,7 @@ def start_server(store, browser_sessions=None):
                 if path == "/api/auth/start": sid, image = browser_sessions.start(self.body().get("id")); self.reply({"session": sid, "image": image}); return
                 parts = path.split("/")
                 if len(parts) == 5 and parts[1:3] == ["api", "auth"]:
-                    session = browser_sessions.get(unquote(parts[3])); action = parts[4]
-                    with session["lock"]:
-                        image = None
-                        if action == "click":
-                            data = self.body(); scale = float(data.get("scale", 1)); session["page"].mouse.click(float(data["x"]) * scale, float(data["y"]) * scale)
-                        elif action == "type": session["page"].keyboard.type(str(self.body().get("text", "")))
-                        elif action == "finish": image = browser_sessions.finish(unquote(parts[3]))
-                        else: raise ValueError("Unknown browser action")
-                        self.reply({"ok": True, "image": image if action == "finish" else browser_sessions.image(session)}); return
+                    action = parts[4]; image = browser_sessions.action(unquote(parts[3]), action, self.body()); self.reply({"ok": True, "image": image}); return
                 self.send_error(404)
             except Exception as error:
                 if path.startswith("/api/auth/"):
