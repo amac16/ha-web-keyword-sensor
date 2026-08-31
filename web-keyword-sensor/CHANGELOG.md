@@ -38,3 +38,11 @@
 
 - Initial release.
 - Added MQTT discovery sensors for webpage phrase matching.
+## 1.5.0
+
+- Bound concurrent checks with a small worker pool instead of creating an
+  unbounded thread per check.
+- Keep MQTT and the ingress UI available while the broker is unavailable.
+- Bound HTTP response memory, close HTTP sessions, and harden invalid intervals.
+- Add browser-operation timeouts, expired-session cleanup, and graceful browser
+  shutdown so Chromium cannot accumulate across retries.

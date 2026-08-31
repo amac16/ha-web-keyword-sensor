@@ -3,6 +3,7 @@
 import base64
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
@@ -10,6 +11,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+LOG = logging.getLogger("web_keyword_sensor.ui")
 
 PATH = Path("/data/checks.json")
 AUTH_DIR = Path("/data/browser-auth")
@@ -76,7 +79,11 @@ class CheckStore:
         self.lock = threading.RLock()
         try: self.checks = json.loads(PATH.read_text())
         except (FileNotFoundError, OSError, json.JSONDecodeError): self.checks = initial; self.save()
-    def save(self): PATH.write_text(json.dumps(self.checks, indent=2) + "\n"); PATH.chmod(0o600)
+    def save(self):
+        temporary = PATH.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(self.checks, indent=2) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        os.replace(temporary, PATH)
     def get(self):
         with self.lock:
             result = []
@@ -88,12 +95,17 @@ class CheckStore:
         with self.lock: return [dict(x) for x in self.checks]
     def put(self, check):
         with self.lock:
+            if not isinstance(check, dict): raise ValueError("check must be an object")
             check.setdefault("id", uuid.uuid4().hex)
             old = next((x for x in self.checks if x.get("id") == check.get("id")), {})
             for secret in ("username", "password", "totp_secret"):
                 if not check.get(secret): check[secret] = old.get(secret, "")
+            if not check.get("name") or not check.get("url") or not check.get("phrase"):
+                raise ValueError("name, URL, and phrase are required")
+            replacing = any(x.get("id") == check.get("id") for x in self.checks)
+            if not replacing and len(self.checks) >= 100: raise ValueError("maximum of 100 checks reached")
             self.checks = [check if x.get("id") == check.get("id") else x for x in self.checks]
-            if not any(x.get("id") == check.get("id") for x in self.checks): self.checks.append(check)
+            if not replacing: self.checks.append(check)
             self.save()
     def delete(self, ident):
         with self.lock: self.checks = [x for x in self.checks if x.get("id") != ident]; self.save()
@@ -105,13 +117,25 @@ class BrowserSessions:
         self.loop_thread = threading.Thread(target=self.loop.run_forever, name="playwright-async", daemon=True)
         self.loop_thread.start()
 
-    def _run(self, coroutine):
-        return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result()
+    def _run(self, coroutine, timeout=60):
+        future = asyncio.run_coroutine_threadsafe(coroutine, self.loop)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise RuntimeError("browser operation timed out")
 
     def start(self, ident): return self._run(self._start(ident))
     async def _start(self, ident):
         check = next((x for x in self.store.get_runtime() if x.get("id") == ident), None)
         if not check or check.get("auth_mode") != "browser" or not check.get("login_url"): raise ValueError("Save a browser SSO check with a login URL first")
+        # Never accumulate a browser/context for repeated authentication
+        # attempts.  A check can have at most one interactive session.
+        with self.lock:
+            old = next((sid for sid, item in self.sessions.items() if item["check"].get("id") == ident), None)
+        if old:
+            with self.lock: self.authenticated.pop(ident, None)
+            await self._close(old)
         try:
             from playwright.async_api import async_playwright
             pw = await async_playwright().start(); browser = await pw.chromium.launch(headless=True, executable_path=next((p for p in ("/usr/bin/chromium", "/usr/bin/chromium-browser") if os.path.exists(p)), None))
@@ -126,18 +150,34 @@ class BrowserSessions:
         sid = uuid.uuid4().hex; session = {"pw": pw, "browser": browser, "context": context, "page": page, "check": check, "lock": asyncio.Lock(), "expires": time.time() + 900}
         with self.lock: self.sessions[sid] = session
         return sid, await self.image(session)
-    async def image(self, session): return base64.b64encode(await session["page"].screenshot(type="png")).decode()
+    async def image(self, session): return base64.b64encode(await session["page"].screenshot(type="png", timeout=10000)).decode()
     def get(self, sid):
         with self.lock:
             session = self.sessions.get(sid)
-            if not session or session["expires"] < time.time(): raise ValueError("Browser session expired")
+            if not session: raise ValueError("Browser session expired")
+            if session["expires"] < time.time():
+                self.sessions.pop(sid, None)
+                asyncio.create_task(self._dispose(session))
+                raise ValueError("Browser session expired")
             session["expires"] = time.time() + 900; return session
     def close(self, sid):
         return self._run(self._close(sid))
     async def _close(self, sid):
         with self.lock: session = self.sessions.pop(sid, None)
-        if session:
-            await session["context"].close(); await session["browser"].close(); await session["pw"].stop()
+        if session: await self._dispose(session)
+    async def _dispose(self, session):
+        for key in ("context", "browser", "pw"):
+            try:
+                await (session[key].close() if key != "pw" else session[key].stop())
+            except Exception: pass
+    async def _close_all(self):
+        with self.lock: sessions = list(self.sessions.items()); self.sessions.clear(); self.authenticated.clear()
+        for _, session in sessions: await self._dispose(session)
+    def close_all(self):
+        try: self._run(self._close_all(), timeout=15)
+        except Exception: LOG.warning("Unable to close browser sessions cleanly")
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.loop_thread.join(timeout=2)
     def finish(self, sid): return self._run(self._finish(sid))
     async def _finish(self, sid):
         session = self.get(sid)
@@ -155,6 +195,10 @@ class BrowserSessions:
     def fetch(self, check): return self._run(self._fetch(check))
     async def _fetch(self, check):
         with self.lock: session = self.authenticated.get(check.get("id"))
+        if session and session["expires"] < time.time():
+            with self.lock: self.authenticated.pop(check.get("id"), None)
+            await self._dispose(session)
+            session = None
         if not session:
             state_path = AUTH_DIR / f"{check.get('id')}.json"
             if not state_path.exists(): raise ValueError("browser SSO has not been completed")
@@ -164,7 +208,11 @@ class BrowserSessions:
         async with session["lock"]:
             response = await session["page"].goto(check["url"], wait_until="domcontentloaded", timeout=30000)
             if not response: raise ValueError("browser did not return a response")
-            return response.status, await session["page"].content()
+            # Do not copy an unbounded DOM into Python.  Keyword matching only
+            # needs the visible page text, capped to the same response limit as
+            # regular HTTP checks.
+            content = await session["page"].evaluate("document.body ? document.body.innerText.slice(0, 16777216) : ''")
+            return response.status, content
     def action(self, sid, action, data): return self._run(self._action(sid, action, data))
     async def _action(self, sid, action, data):
         session = self.get(sid)
@@ -189,7 +237,10 @@ def start_server(store, browser_sessions=None):
     if browser_sessions is None: browser_sessions = BrowserSessions(store)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args): pass
-        def body(self): return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        def body(self):
+            length = int(self.headers.get("Content-Length", 0))
+            if length > 1024 * 1024: raise ValueError("request body is too large")
+            return json.loads(self.rfile.read(length))
         def reply(self, value, status=200):
             data = json.dumps(value).encode(); self.send_response(status); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
         def error(self, message, status=400): self.reply({"error": str(message)}, status)
@@ -225,4 +276,5 @@ def start_server(store, browser_sessions=None):
             prefix = "/api/checks/"; path = urlparse(self.path).path
             if not path.startswith(prefix): self.send_error(404); return
             store.delete(unquote(path[len(prefix):])); self.reply({"ok": True})
-    server = ThreadingHTTPServer(("0.0.0.0", 8099), Handler); threading.Thread(target=server.serve_forever, name="web-ui", daemon=True).start(); return server
+    server = ThreadingHTTPServer(("0.0.0.0", 8099), Handler); server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, name="web-ui", daemon=True).start(); return server

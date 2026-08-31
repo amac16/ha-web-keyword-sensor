@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Scrape configured web pages and publish MQTT discovery entities."""
 import hashlib, html, json, logging, os, re, signal, threading, time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 import paho.mqtt.client as mqtt
 import pyotp
@@ -16,7 +17,7 @@ WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", 
 
 def text(value): return SPACE.sub(" ", html.unescape(TAGS.sub(" ", value))).strip()
 def slug(value): return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or "web_keyword"
-def ident(check): return f"{slug(check['name'])}_{hashlib.sha1(check['url'].encode(), usedforsecurity=False).hexdigest()[:8]}"
+def ident(check): return f"{slug(check.get('name', 'web keyword'))}_{hashlib.sha1(str(check.get('url', '')).encode(), usedforsecurity=False).hexdigest()[:8]}"
 def valid(check):
     try:
         p = urlparse(check["url"]); return p.scheme in ("http", "https") and bool(p.netloc) and bool(check["phrase"])
@@ -25,7 +26,10 @@ def initial_checks(options):
     raw = options.get("checks", "[]")
     try: checks = raw if isinstance(raw, list) else json.loads(raw)
     except (TypeError, json.JSONDecodeError): checks = []
-    for check in checks: check.setdefault("id", ident(check))
+    if not isinstance(checks, list): return []
+    checks = [check for check in checks[:100] if isinstance(check, dict)]
+    for check in checks:
+        check.setdefault("id", ident(check))
     return checks
 def in_schedule(check):
     now = time.localtime()
@@ -42,7 +46,11 @@ def in_schedule(check):
 
 class App:
     def __init__(self, options):
-        self.options = options; self.store = CheckStore(initial_checks(options)); self.browser = BrowserSessions(self.store); self.running = set(); self.due = {}; self.known = {}
+        self.options = options; self.store = CheckStore(initial_checks(options)); self.browser = BrowserSessions(self.store); self.running = set(); self.due = {}; self.known = {}; self.state_lock = threading.RLock()
+        try: configured_workers = int(options.get("max_concurrent_checks", 2))
+        except (TypeError, ValueError): configured_workers = 2
+        self.max_workers = max(1, min(configured_workers, 8))
+        self.executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="keyword-check")
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="web-keyword-sensor")
         if options.get("mqtt_username"): self.client.username_pw_set(options["mqtt_username"], options.get("mqtt_password") or None)
         self.client.will_set("web_keyword_sensor/status", "offline", qos=1, retain=True); self.client.on_connect = self.connected; self.client.on_disconnect = self.disconnected
@@ -52,7 +60,11 @@ class App:
     def disconnected(self, client, userdata, flags, reason_code, properties=None):
         if not STOP.is_set(): LOG.warning("MQTT disconnected: %s", reason_code)
     def connect(self):
-        self.client.connect(self.options.get("mqtt_host", "homeassistant.local"), int(self.options.get("mqtt_port", 1883))); self.client.loop_start()
+        self.client.reconnect_delay_set(min_delay=2, max_delay=60)
+        self.client.loop_start()
+        # connect_async keeps a broker outage from preventing the ingress UI and
+        # scheduler from starting.  Paho's network thread retries on its own.
+        self.client.connect_async(self.options.get("mqtt_host", "homeassistant.local"), int(self.options.get("mqtt_port", 1883)))
     def discovery(self, check):
         name = ident(check); base = f"web_keyword_sensor/{name}"; component = check["entity_type"]
         config = {"name": check["name"], "unique_id": f"web_keyword_sensor_{name}", "state_topic": f"{base}/state", "availability_topic": "web_keyword_sensor/status", "payload_available": "online", "payload_not_available": "offline", "json_attributes_topic": f"{base}/attributes", "device": {"identifiers": ["web_keyword_sensor"], "name": "Web Keyword Sensor", "manufacturer": "Web Keyword Sensor"}}
@@ -62,38 +74,50 @@ class App:
     def run(self, check, state_topic):
         if not check.get("enabled", True): return
         try:
-            session = requests.Session()
             headers = {"User-Agent": "Home Assistant Web Keyword Sensor/1.0"}; headers.update(check.get("headers") or {})
-            timeout = int(self.options.get("request_timeout", 30)); verify = check.get("verify_ssl", True)
+            timeout = max(5, min(int(self.options.get("request_timeout", 30)), 120)); verify = check.get("verify_ssl", True)
+            max_bytes = max(64 * 1024, min(int(self.options.get("max_response_bytes", 2 * 1024 * 1024)), 16 * 1024 * 1024))
+            status = None
             if check.get("auth_mode", "basic") == "browser":
-                try: status, content = self.browser.fetch(check)
+                try: status, response_text = self.browser.fetch(check)
                 except Exception as error: self.auth_failure(check, str(error)); return
                 if status in (401, 403):
                     self.auth_failure(check, f"browser session expired or invalid (HTTP {status})"); return
                 if status >= 400: raise requests.HTTPError(f"browser request failed (HTTP {status})")
-                response_text = content
-            elif check.get("login_url"):
-                if not check.get("username") or not check.get("password"):
-                    self.auth_failure(check, "credentials are missing"); return
-                login = {check.get("username_field", "username"): check["username"], check.get("password_field", "password"): check["password"]}
-                if check.get("totp_secret"):
-                    login[check.get("totp_field", "totp")] = pyotp.TOTP(check["totp_secret"]).now()
-                auth_response = session.post(check["login_url"], data=login, headers=headers, timeout=timeout, verify=verify)
-                success_text = check.get("success_text")
-                if auth_response.status_code >= 400 or (success_text and success_text not in auth_response.text):
-                    self.auth_failure(check, f"login rejected (HTTP {auth_response.status_code})"); return
-                check["auth_status"] = "Credentials successful"
-                self.store.put(check)
-                response = session.get(check["url"], headers=headers, timeout=timeout, verify=verify)
-                if response.status_code in (401, 403):
-                    self.auth_failure(check, f"credentials expired or invalid (HTTP {response.status_code})"); return
-                response.raise_for_status(); response_text = response.text
+            else:
+                with requests.Session() as session:
+                    if check.get("login_url"):
+                        if not check.get("username") or not check.get("password"):
+                            self.auth_failure(check, "credentials are missing"); return
+                        login = {check.get("username_field", "username"): check["username"], check.get("password_field", "password"): check["password"]}
+                        if check.get("totp_secret"):
+                            login[check.get("totp_field", "totp")] = pyotp.TOTP(check["totp_secret"]).now()
+                        auth_response = session.post(check["login_url"], data=login, headers=headers, timeout=timeout, verify=verify, stream=True)
+                        success_text = check.get("success_text")
+                        auth_body = self.read_response(auth_response, max_bytes)
+                        if auth_response.status_code >= 400 or (success_text and success_text not in auth_body):
+                            self.auth_failure(check, f"login rejected (HTTP {auth_response.status_code})"); return
+                        check["auth_status"] = "Credentials successful"
+                        self.store.put(check)
+                    response = session.get(check["url"], headers=headers, timeout=timeout, verify=verify, stream=True)
+                    status = response.status_code
+                    if status in (401, 403):
+                        self.auth_failure(check, f"credentials expired or invalid (HTTP {status})"); return
+                    response.raise_for_status(); response_text = self.read_response(response, max_bytes)
             found = check["phrase"] in text(response_text) if check.get("case_sensitive") else check["phrase"].casefold() in text(response_text).casefold()
             value = ("ON" if found else "OFF") if check["entity_type"] == "binary_sensor" else ("1" if found else "0")
             attrs = {"url": check["url"], "phrase": check["phrase"], "matched": found, "checked_at": int(time.time()), "http_status": status if check.get("auth_mode", "basic") == "browser" else response.status_code}
             self.client.publish(state_topic, value, qos=1, retain=True); self.client.publish(state_topic.rsplit("/", 1)[0] + "/attributes", json.dumps(attrs), qos=1, retain=True); LOG.info("%s: %s", check["name"], "matched" if found else "not matched")
         except requests.RequestException as error: LOG.warning("%s: request failed: %s", check.get("name", "unnamed"), error)
         except Exception: LOG.exception("%s: check failed", check.get("name", "unnamed"))
+    @staticmethod
+    def read_response(response, max_bytes):
+        data = bytearray()
+        for chunk in response.iter_content(65536):
+            data.extend(chunk)
+            if len(data) >= max_bytes: break
+        response.close()
+        return bytes(data[:max_bytes]).decode(response.encoding or "utf-8", errors="replace")
     def auth_failure(self, check, reason):
         check["auth_status"] = f"Authentication failed: {reason}"
         self.store.put(check)
@@ -110,15 +134,28 @@ class App:
             for check in self.store.get_runtime():
                 if not valid(check): continue
                 cid = check.setdefault("id", ident(check)); current.add(cid)
-                if cid not in self.known: self.known[cid] = self.discovery(check); self.due[cid] = 0
-                if in_schedule(check) and self.due.get(cid, 0) <= now and cid not in self.running:
-                    self.running.add(cid)
-                    def task(item=check, ident_=cid):
-                        try: self.run(item, self.known[ident_])
-                        finally: self.running.discard(ident_); self.due[ident_] = time.monotonic() + int(item["interval"]) * UNITS[item["unit"]]
-                    threading.Thread(target=task, daemon=True).start()
+                if cid not in self.known:
+                    try: self.known[cid] = self.discovery(check); self.due[cid] = 0
+                    except Exception: LOG.exception("Unable to publish discovery for %s", check.get("name", "unnamed")); continue
+                with self.state_lock:
+                    available = len(self.running) < self.max_workers
+                    if in_schedule(check) and self.due.get(cid, 0) <= now and cid not in self.running and available:
+                        self.running.add(cid)
+                        state_topic = self.known[cid]
+                        def task(item=check, ident_=cid, topic=state_topic):
+                            try: self.run(item, topic)
+                            except Exception: LOG.exception("Unhandled check failure: %s", item.get("name", "unnamed"))
+                            finally:
+                                with self.state_lock:
+                                    self.running.discard(ident_)
+                                    try: interval = max(1, int(item.get("interval", 15))) * UNITS.get(item.get("unit", "minutes"), 60)
+                                    except (TypeError, ValueError): interval = 900
+                                    self.due[ident_] = time.monotonic() + interval
+                        self.executor.submit(task)
             for cid in set(self.known) - current:
                 self.known.pop(cid); self.due.pop(cid, None)
+        self.executor.shutdown(wait=True, cancel_futures=True)
+        self.browser.close_all()
         self.client.loop_stop(); self.client.disconnect()
 
 def main():

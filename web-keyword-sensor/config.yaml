@@ -1,5 +1,5 @@
 name: Web Keyword Sensor
-version: "1.4.2"
+version: "1.5.0"
 slug: web_keyword_sensor
 description: Create sensors from phrases found on web pages
 url: https://github.com/amac16/ha-web-keyword-sensor#readme
@@ -21,6 +21,8 @@ options:
   mqtt_password: ""
   discovery_prefix: homeassistant
   request_timeout: 30
+  max_concurrent_checks: 2
+  max_response_bytes: 2097152
   checks: "[]"
 schema:
   mqtt_host: str
@@ -29,6 +31,8 @@ schema:
   mqtt_password: password?
   discovery_prefix: str
   request_timeout: int(5,120)
+  max_concurrent_checks: int(1,8)
+  max_response_bytes: int(65536,16777216)
   checks: str
 environment:
   PYTHONUNBUFFERED: "1"

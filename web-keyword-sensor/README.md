@@ -58,11 +58,15 @@ it again, and use `Start browser`. The Ingress UI displays a Chromium
 screenshot; click the screenshot and type into it to complete redirects, MFA,
 or consent screens, then select `Finish authentication`. The browser context
 and cookies remain in memory only and must be reauthenticated after an app
-restart. Playwright and Alpine Chromium are included in the image.
+restart. Playwright and Chromium are included in the image. Browser operations
+have hard timeouts and expired sessions are closed automatically.
 
 ## Security and limitations
 
 Only HTTP and HTTPS URLs are accepted. Requests have a configurable timeout.
+Checks use a bounded worker pool (two concurrent checks by default), and page
+responses are capped at 2 MiB by default. Keeping these limits small prevents a
+slow or unusually large page from consuming the host's memory.
 Custom headers are supported for pages requiring them; do not put secrets in
 headers if app logs or backups are shared. The page is reduced to plain text
 before matching. Browser SSO requires an interactive Ingress session and does
