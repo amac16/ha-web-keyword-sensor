@@ -4,8 +4,21 @@ Release notes are maintained in [`CHANGELOG.md`](CHANGELOG.md) and should be
 updated whenever the app version in `config.yaml` changes.
 
 This Home Assistant app polls configured HTTP(S) pages and publishes MQTT
-discovery entities when a phrase is found. Each check has its own URL, phrase,
-entity type, interval, time unit, matching mode, and TLS setting.
+discovery entities. Each check has its own URL, matching mode, entity type,
+interval, schedule, authentication, and TLS setting. Checks run independently,
+so one unavailable page does not stop the others.
+
+## How it works
+
+1. Create one or more checks in the app's Ingress interface.
+2. Choose **Exact phrase** or **AI context match**.
+3. Choose the check's entity type, schedule, and authentication mode.
+4. The app fetches the page, converts it to text, evaluates the match, and
+   publishes the state and safe metadata over MQTT.
+5. Home Assistant creates the entity automatically through MQTT discovery.
+
+Use the **Test** button on any saved check to run it immediately and see the
+same state and match result that would be published normally.
 
 ## Setup
 
@@ -35,6 +48,10 @@ The `binary_sensor` is `on` when the phrase occurs and `off` otherwise. A
 `sensor` reports `1` for a match and `0` otherwise. Multiple checks can be
 listed and run independently.
 
+For exact matching, the phrase is required. HTML is reduced to plain text
+before matching. The check is `ON`/`1` when the phrase is found and `OFF`/`0`
+when it is not found.
+
 The form also supports selecting individual weekdays and a daily `From`/`To`
 window in one-hour increments. The existing interval remains the polling
 frequency while the time window controls when polling is allowed. Overnight
@@ -52,6 +69,11 @@ the credentials and model. Each check can select `AI context match` and one enab
 profile, then describe the information to find. The page text and request are
 sent to that provider; webpage text is treated as untrusted data.
 
+The provider profile's model field is a provider-specific model ID, such as
+`gpt-4.1-mini`, `gemini-2.5-flash`, or an available Claude model. The profile
+dropdown on an AI check selects exactly one enabled profile. AI output is
+required to contain a boolean match, a short summary, and optional findings.
+
 Each saved check has a **Test** button. It runs the check immediately, publishes
 the normal MQTT state, and displays the resulting state and match value in the
 management page. A failed test reports an error instead of publishing a false
@@ -64,10 +86,15 @@ are serialized and use the same request timeout and page-size limits as normal
 checks, so model use should be scheduled at a reasonable interval. External
 AI calls may incur provider charges and may disclose private page contents.
 
+The app does not ask the AI provider to browse the web: it sends the text
+retrieved from the configured page. JavaScript-rendered pages should use Browser
+SSO when required.
+
 ## Authentication
 
-Each check can optionally define a login URL, username, password, TOTP secret,
-the login form field names, and login success text. Credentials are stored in
+Auth mode defaults to **None**, which hides all login controls. **Username/password/TOTP**
+can define a login URL, username, password, TOTP secret, login form field names,
+and login success text. Credentials are stored in
 `/data/checks.json` with mode `0600` and are never returned by the management
 API. Leave secret fields blank while editing to preserve existing values. The
 app reports successful authentication in the form and sends a persistent Home
@@ -82,6 +109,14 @@ or consent screens, then select `Finish authentication`. The browser context
 and cookies remain in memory only and must be reauthenticated after an app
 restart. Playwright and Chromium are included in the image. Browser operations
 have hard timeouts and expired sessions are closed automatically.
+
+## MQTT entities and attributes
+
+Each check receives a stable unique ID derived from its name and URL. The app
+publishes the entity state, availability, and attributes including the URL,
+match mode, match result, timestamp, and HTTP status. AI entities additionally
+include the selected profile/model, summary, and bounded findings. API keys,
+passwords, page contents, prompts, and model responses are never published.
 
 ## Security and limitations
 
