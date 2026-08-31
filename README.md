@@ -19,7 +19,7 @@ relevant information.
 
 ## Add to Home Assistant
 
-Publish this repository to GitHub, then in Home Assistant open:
+In Home Assistant open:
 
 **Settings → Apps → App Store → ⋮ → Repositories**
 
@@ -29,3 +29,5 @@ as a custom repository app.
 Install and configure **Web Keyword Sensor**, then open its Ingress panel to
 create checks and AI provider profiles. The complete feature and configuration
 guide is in [`web-keyword-sensor/README.md`](web-keyword-sensor/README.md).
+
+<sup>† This app was developed almost entirely using Ai.</sup>
