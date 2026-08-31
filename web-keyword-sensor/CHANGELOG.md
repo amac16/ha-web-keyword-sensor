@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2
+
+- Use Playwright's Async API on a dedicated event loop for browser SSO.
+
 ## 1.3.3
 
 - Updated Playwright for the Python 3.14 runtime.

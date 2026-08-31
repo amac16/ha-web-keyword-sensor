@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Ingress UI, persistent check store, and interactive browser authentication."""
 import base64
+import asyncio
 import json
 import os
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -99,68 +99,82 @@ class CheckStore:
         with self.lock: self.checks = [x for x in self.checks if x.get("id") != ident]; self.save()
 
 class BrowserSessions:
-    def __init__(self, store): self.store, self.sessions, self.authenticated, self.lock, self.executor = store, {}, {}, threading.RLock(), ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
-    def start(self, ident): return self.executor.submit(self._start, ident).result()
-    def _start(self, ident):
+    def __init__(self, store):
+        self.store, self.sessions, self.authenticated, self.lock = store, {}, {}, threading.RLock()
+        self.loop = asyncio.new_event_loop()
+        self.loop_thread = threading.Thread(target=self.loop.run_forever, name="playwright-async", daemon=True)
+        self.loop_thread.start()
+
+    def _run(self, coroutine):
+        return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result()
+
+    def start(self, ident): return self._run(self._start(ident))
+    async def _start(self, ident):
         check = next((x for x in self.store.get_runtime() if x.get("id") == ident), None)
         if not check or check.get("auth_mode") != "browser" or not check.get("login_url"): raise ValueError("Save a browser SSO check with a login URL first")
         try:
-            from playwright.sync_api import sync_playwright
-            pw = sync_playwright().start(); browser = pw.chromium.launch(headless=True, executable_path=next((p for p in ("/usr/bin/chromium", "/usr/bin/chromium-browser") if os.path.exists(p)), None))
+            from playwright.async_api import async_playwright
+            pw = await async_playwright().start(); browser = await pw.chromium.launch(headless=True, executable_path=next((p for p in ("/usr/bin/chromium", "/usr/bin/chromium-browser") if os.path.exists(p)), None))
         except Exception as error: raise RuntimeError("Playwright/Chromium is unavailable: %s" % error) from error
         state_path = AUTH_DIR / f"{ident}.json"
-        context = browser.new_context(storage_state=str(state_path) if state_path.exists() else None, ignore_https_errors=not check.get("verify_ssl", True))
-        page = context.new_page(); page.goto(check["login_url"], wait_until="domcontentloaded", timeout=30000)
-        sid = uuid.uuid4().hex; session = {"pw": pw, "browser": browser, "page": page, "check": check, "lock": threading.RLock(), "expires": time.time() + 900}
+        try:
+            context = await browser.new_context(storage_state=str(state_path) if state_path.exists() else None, ignore_https_errors=not check.get("verify_ssl", True))
+            page = await context.new_page(); await page.goto(check["login_url"], wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            await browser.close(); await pw.stop()
+            raise
+        sid = uuid.uuid4().hex; session = {"pw": pw, "browser": browser, "context": context, "page": page, "check": check, "lock": asyncio.Lock(), "expires": time.time() + 900}
         with self.lock: self.sessions[sid] = session
-        return sid, self.image(session)
-    @staticmethod
-    def image(session): return base64.b64encode(session["page"].screenshot(type="png")).decode()
+        return sid, await self.image(session)
+    async def image(self, session): return base64.b64encode(await session["page"].screenshot(type="png")).decode()
     def get(self, sid):
         with self.lock:
             session = self.sessions.get(sid)
             if not session or session["expires"] < time.time(): raise ValueError("Browser session expired")
             session["expires"] = time.time() + 900; return session
     def close(self, sid):
+        return self._run(self._close(sid))
+    async def _close(self, sid):
         with self.lock: session = self.sessions.pop(sid, None)
-        if session: session["browser"].close(); session["pw"].stop()
-    def finish(self, sid): return self.executor.submit(self._finish, sid).result()
-    def _finish(self, sid):
+        if session:
+            await session["context"].close(); await session["browser"].close(); await session["pw"].stop()
+    def finish(self, sid): return self._run(self._finish(sid))
+    async def _finish(self, sid):
         session = self.get(sid)
-        with session["lock"]:
-            response = session["page"].goto(session["check"]["url"], wait_until="domcontentloaded", timeout=30000)
+        async with session["lock"]:
+            response = await session["page"].goto(session["check"]["url"], wait_until="domcontentloaded", timeout=30000)
             if response and response.status >= 400: raise ValueError("browser login rejected (HTTP %s)" % response.status)
             success_text = session["check"].get("success_text")
-            if success_text and success_text not in session["page"].content(): raise ValueError("browser login success text was not found")
+            if success_text and success_text not in await session["page"].content(): raise ValueError("browser login success text was not found")
             AUTH_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
             state_path = AUTH_DIR / f"{session['check']['id']}.json"
-            session["page"].context.storage_state(path=str(state_path)); state_path.chmod(0o600)
+            await session["page"].context.storage_state(path=str(state_path)); state_path.chmod(0o600)
             session["check"]["auth_status"] = "Browser SSO successful"; self.store.put(session["check"])
             with self.lock: self.authenticated[session["check"]["id"]] = session
-            return self.image(session)
-    def fetch(self, check): return self.executor.submit(self._fetch, check).result()
-    def _fetch(self, check):
+            return await self.image(session)
+    def fetch(self, check): return self._run(self._fetch(check))
+    async def _fetch(self, check):
         with self.lock: session = self.authenticated.get(check.get("id"))
         if not session:
             state_path = AUTH_DIR / f"{check.get('id')}.json"
             if not state_path.exists(): raise ValueError("browser SSO has not been completed")
-            sid, _ = self._start(check.get("id"))
+            sid, _ = await self._start(check.get("id"))
             with self.lock: session = self.sessions[sid]
             with self.lock: self.authenticated[check.get("id")] = session
-        with session["lock"]:
-            response = session["page"].goto(check["url"], wait_until="domcontentloaded", timeout=30000)
+        async with session["lock"]:
+            response = await session["page"].goto(check["url"], wait_until="domcontentloaded", timeout=30000)
             if not response: raise ValueError("browser did not return a response")
-            return response.status, session["page"].content()
-    def action(self, sid, action, data): return self.executor.submit(self._action, sid, action, data).result()
-    def _action(self, sid, action, data):
+            return response.status, await session["page"].content()
+    def action(self, sid, action, data): return self._run(self._action(sid, action, data))
+    async def _action(self, sid, action, data):
         session = self.get(sid)
-        with session["lock"]:
+        if action == "finish": return await self._finish(sid)
+        async with session["lock"]:
             if action == "click":
-                scale = float(data.get("scale", 1)); session["page"].mouse.click(float(data["x"]) * scale, float(data["y"]) * scale)
-            elif action == "type": session["page"].keyboard.type(str(data.get("text", "")))
-            elif action == "finish": return self._finish(sid)
+                scale = float(data.get("scale", 1)); await session["page"].mouse.click(float(data["x"]) * scale, float(data["y"]) * scale)
+            elif action == "type": await session["page"].keyboard.type(str(data.get("text", "")))
             else: raise ValueError("Unknown browser action")
-            return self.image(session)
+            return await self.image(session)
 
 def notify_auth_failure(check, reason):
     check["auth_status"] = "Authentication failed: " + str(reason)
