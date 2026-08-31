@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.7.1
+
+- Truncated long saved AI requests to 250 characters with a blue **more...**
+  link that expands the full request when clicked.
+
+## 1.7.0
+
+- Recorded and displayed the last run and next eligible scheduled run
+  timestamps for scheduled checks and manual tests.
+
 ## 1.6.9
 
 - Increased OpenAI Responses output budget and set low reasoning effort for

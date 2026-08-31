@@ -33,8 +33,8 @@ def initial_checks(options):
     for check in checks:
         check.setdefault("id", ident(check))
     return checks
-def in_schedule(check):
-    now = time.localtime()
+def in_schedule(check, timestamp=None):
+    now = time.localtime(timestamp) if timestamp is not None else time.localtime()
     days = check.get("days", list(WEEKDAYS))
     if WEEKDAYS[now.tm_wday] not in days: return False
     def minutes(value, default):
@@ -140,6 +140,22 @@ class App:
         self.client.publish(state_topic.rsplit("/", 1)[0] + "/availability", "offline", qos=1, retain=True)
         check["auth_status"] = "AI unavailable: " + reason
         self.store.put(check)
+    def interval_seconds(self, check):
+        try: return max(1, int(check.get("interval", 15))) * UNITS.get(check.get("unit", "minutes"), 60)
+        except (TypeError, ValueError): return 900
+    def mark_run_start(self, check):
+        check["last_ran_at"] = time.time()
+        self.store.put(check)
+    def mark_next_run(self, check, interval=None):
+        interval = interval if interval is not None else self.interval_seconds(check)
+        candidate = time.time() + interval
+        # Show the next eligible scheduled time, not merely the next interval,
+        # when a check's weekday/time window would otherwise be closed.
+        for _ in range(8 * 24 * 60):
+            if in_schedule(check, candidate): break
+            candidate += 60
+        check["next_run_at"] = candidate
+        self.store.put(check)
     def test_check(self, ident_):
         check = next((x for x in self.store.get_runtime() if x.get("id") == ident_), None)
         if not check or not valid(check): return {"ok": False, "error": "check is missing or invalid"}
@@ -149,8 +165,11 @@ class App:
                 try: self.known[ident_] = self.discovery(check)
                 except Exception: return {"ok": False, "error": "unable to publish discovery"}
             self.running.add(ident_)
-        try: return self.run(check, self.known[ident_])
+        try:
+            self.mark_run_start(check)
+            return self.run(check, self.known[ident_])
         finally:
+            self.mark_next_run(check)
             with self.state_lock: self.running.discard(ident_)
     @staticmethod
     def read_response(response, max_bytes):
@@ -185,14 +204,16 @@ class App:
                         self.running.add(cid)
                         state_topic = self.known[cid]
                         def task(item=check, ident_=cid, topic=state_topic):
-                            try: self.run(item, topic)
+                            try:
+                                self.mark_run_start(item)
+                                self.run(item, topic)
                             except Exception: LOG.exception("Unhandled check failure: %s", item.get("name", "unnamed"))
                             finally:
                                 with self.state_lock:
                                     self.running.discard(ident_)
-                                    try: interval = max(1, int(item.get("interval", 15))) * UNITS.get(item.get("unit", "minutes"), 60)
-                                    except (TypeError, ValueError): interval = 900
+                                    interval = self.interval_seconds(item)
                                     self.due[ident_] = time.monotonic() + interval
+                                    self.mark_next_run(item, interval)
                         self.executor.submit(task)
             for cid in set(self.known) - current:
                 self.known.pop(cid); self.due.pop(cid, None)
