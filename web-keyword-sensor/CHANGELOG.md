@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.6
+
+- Displayed each check's selected weekdays and daily start/end time in the
+  saved-entry list.
+
 ## 1.6.5
 
 - Increased OpenAI Responses output headroom to avoid empty results when
