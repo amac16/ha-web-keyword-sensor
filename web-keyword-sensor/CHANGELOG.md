@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.3
+
+- Fixed the `...less` prompt control by using delegated click handling after
+  the expanded text is rendered.
+
 ## 1.7.2
 
 - Styled the prompt expansion control as a compact hyperlink.
