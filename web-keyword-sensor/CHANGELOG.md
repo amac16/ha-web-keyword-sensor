@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.5
+
+- Increased OpenAI Responses output headroom to avoid empty results when
+  reasoning consumes the smaller output budget.
+- Reported safe provider response status/reason details when an AI check has no
+  usable output.
+
 ## 1.6.4
 
 - Added a **Test** button beside each saved check to run it immediately.

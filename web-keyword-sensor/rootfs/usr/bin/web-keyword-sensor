@@ -135,7 +135,7 @@ class App:
         except Exception as error:
             if check.get("match_mode") == "ai_context": self.ai_unavailable(check, state_topic, "AI evaluation failed")
             LOG.exception("%s: check failed", check.get("name", "unnamed"))
-            return {"ok": False, "error": "check failed"}
+            return {"ok": False, "error": "check failed: " + str(error)[:300]}
     def ai_unavailable(self, check, state_topic, reason):
         self.client.publish(state_topic.rsplit("/", 1)[0] + "/availability", "offline", qos=1, retain=True)
         check["auth_status"] = "AI unavailable: " + reason
