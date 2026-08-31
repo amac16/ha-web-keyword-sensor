@@ -52,11 +52,18 @@ def evaluate(profile, request, page, timeout=45):
 
 
 def _openai(profile, request, page, timeout):
-    endpoint = profile.get("endpoint") or "https://api.openai.com/v1/chat/completions"
-    response = requests.post(endpoint, headers={"Authorization": "Bearer " + profile["api_key"], "Content-Type": "application/json"}, json={"model": profile["model"], "temperature": 0, "max_tokens": 700, "response_format": {"type": "json_object"}, "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": _prompt(request, page)}]}, timeout=timeout)
-    response.raise_for_status()
-    data = response.json(); content = data["choices"][0]["message"]["content"]
+    endpoint = profile.get("endpoint") or "https://api.openai.com/v1/responses"
+    schema = {"type": "object", "properties": {"match": {"type": "boolean"}, "summary": {"type": "string"}, "findings": {"type": "array", "items": {"type": "string"}}}, "required": ["match", "summary", "findings"], "additionalProperties": False}
+    response = requests.post(endpoint, headers={"Authorization": "Bearer " + profile["api_key"], "Content-Type": "application/json"}, json={"model": profile["model"], "input": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": _prompt(request, page)}], "text": {"format": {"type": "json_schema", "name": "web_keyword_result", "strict": True, "schema": schema}}, "max_output_tokens": 700}, timeout=timeout)
+    if not response.ok: raise ValueError(_provider_error("OpenAI", response))
+    data = response.json(); content = data.get("output_text") or next((part.get("text", "") for item in data.get("output", []) for part in item.get("content", []) if part.get("type") == "output_text"), "")
     return _parse(content)
+
+
+def _provider_error(name, response):
+    try: message = response.json().get("error", {}).get("message", "request rejected")
+    except (ValueError, AttributeError): message = "request rejected"
+    return f"{name} rejected the request (HTTP {response.status_code}): {str(message)[:300]}"
 
 
 def _google(profile, request, page, timeout):

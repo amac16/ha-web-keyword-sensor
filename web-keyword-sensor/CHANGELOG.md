@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.2
+
+- Updated OpenAI AI checks to use the current Responses API at
+  `https://api.openai.com/v1/responses` with structured JSON output.
+- Added provider error details so invalid model or request settings are easier
+  to diagnose without exposing API keys.
+
 ## 1.6.1
 
 - Added a **Test provider** button to verify an AI profile's provider, model,
