@@ -1,5 +1,8 @@
 # Web Keyword Sensor
 
+Release notes are maintained in [`CHANGELOG.md`](CHANGELOG.md) and should be
+updated whenever the app version in `config.yaml` changes.
+
 This Home Assistant app polls configured HTTP(S) pages and publishes MQTT
 discovery entities when a phrase is found. Each check has its own URL, phrase,
 entity type, interval, time unit, matching mode, and TLS setting.
