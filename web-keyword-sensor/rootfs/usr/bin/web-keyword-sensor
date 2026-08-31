@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 import paho.mqtt.client as mqtt
 import pyotp
 import requests
-from web_ui import CheckStore, start_server
+from web_ui import BrowserSessions, CheckStore, start_server
 
 LOG = logging.getLogger("web_keyword_sensor")
 STOP = threading.Event()
@@ -42,7 +42,7 @@ def in_schedule(check):
 
 class App:
     def __init__(self, options):
-        self.options = options; self.store = CheckStore(initial_checks(options)); self.running = set(); self.due = {}; self.known = {}
+        self.options = options; self.store = CheckStore(initial_checks(options)); self.browser = BrowserSessions(self.store); self.running = set(); self.due = {}; self.known = {}
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="web-keyword-sensor")
         if options.get("mqtt_username"): self.client.username_pw_set(options["mqtt_username"], options.get("mqtt_password") or None)
         self.client.will_set("web_keyword_sensor/status", "offline", qos=1, retain=True); self.client.on_connect = self.connected; self.client.on_disconnect = self.disconnected
@@ -65,7 +65,14 @@ class App:
             session = requests.Session()
             headers = {"User-Agent": "Home Assistant Web Keyword Sensor/1.0"}; headers.update(check.get("headers") or {})
             timeout = int(self.options.get("request_timeout", 30)); verify = check.get("verify_ssl", True)
-            if check.get("login_url"):
+            if check.get("auth_mode", "basic") == "browser":
+                try: status, content = self.browser.fetch(check)
+                except Exception as error: self.auth_failure(check, str(error)); return
+                if status in (401, 403):
+                    self.auth_failure(check, f"browser session expired or invalid (HTTP {status})"); return
+                if status >= 400: raise requests.HTTPError(f"browser request failed (HTTP {status})")
+                response_text = content
+            elif check.get("login_url"):
                 if not check.get("username") or not check.get("password"):
                     self.auth_failure(check, "credentials are missing"); return
                 login = {check.get("username_field", "username"): check["username"], check.get("password_field", "password"): check["password"]}
@@ -77,13 +84,13 @@ class App:
                     self.auth_failure(check, f"login rejected (HTTP {auth_response.status_code})"); return
                 check["auth_status"] = "Credentials successful"
                 self.store.put(check)
-            response = session.get(check["url"], headers=headers, timeout=timeout, verify=verify)
-            if response.status_code in (401, 403):
-                self.auth_failure(check, f"credentials expired or invalid (HTTP {response.status_code})"); return
-            response.raise_for_status()
-            found = check["phrase"] in text(response.text) if check.get("case_sensitive") else check["phrase"].casefold() in text(response.text).casefold()
+                response = session.get(check["url"], headers=headers, timeout=timeout, verify=verify)
+                if response.status_code in (401, 403):
+                    self.auth_failure(check, f"credentials expired or invalid (HTTP {response.status_code})"); return
+                response.raise_for_status(); response_text = response.text
+            found = check["phrase"] in text(response_text) if check.get("case_sensitive") else check["phrase"].casefold() in text(response_text).casefold()
             value = ("ON" if found else "OFF") if check["entity_type"] == "binary_sensor" else ("1" if found else "0")
-            attrs = {"url": check["url"], "phrase": check["phrase"], "matched": found, "checked_at": int(time.time()), "http_status": response.status_code}
+            attrs = {"url": check["url"], "phrase": check["phrase"], "matched": found, "checked_at": int(time.time()), "http_status": status if check.get("auth_mode", "basic") == "browser" else response.status_code}
             self.client.publish(state_topic, value, qos=1, retain=True); self.client.publish(state_topic.rsplit("/", 1)[0] + "/attributes", json.dumps(attrs), qos=1, retain=True); LOG.info("%s: %s", check["name"], "matched" if found else "not matched")
         except requests.RequestException as error: LOG.warning("%s: request failed: %s", check.get("name", "unnamed"), error)
         except Exception: LOG.exception("%s: check failed", check.get("name", "unnamed"))
@@ -97,7 +104,7 @@ class App:
                 requests.post("http://supervisor/core/api/services/persistent_notification/create", headers={"Authorization": f"Bearer {token}"}, json={"title": "Web Keyword Sensor authentication failure", "message": f"Authentication failed for {check.get('name', 'unnamed')}: {reason}"}, timeout=10)
             except requests.RequestException: LOG.warning("Unable to create Home Assistant notification")
     def start(self):
-        self.connect(); start_server(self.store); LOG.info("Web form available through app ingress")
+        self.connect(); start_server(self.store, self.browser); LOG.info("Web form available through app ingress")
         while not STOP.wait(1):
             now = time.monotonic(); current = set()
             for check in self.store.get_runtime():

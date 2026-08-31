@@ -39,7 +39,7 @@ windows such as 22:00 to 06:00 are supported. The app uses MQTT discovery, so
 no Home Assistant API token is required. The default MQTT host is
 `homeassistant.local`; set broker credentials if needed.
 
-## Optional site login
+## Authentication
 
 Each check can optionally define a login URL, username, password, TOTP secret,
 the login form field names, and login success text. Credentials are stored in
@@ -50,10 +50,18 @@ Assistant notification when authentication fails or a protected page returns
 HTTP 401/403. JavaScript login flows, CAPTCHA, passkeys, SMS, and email codes
 require site-specific automation and are not supported by the generic login.
 
+For JavaScript-based SSO, set `Auth mode` to `Browser SSO`, save the check, edit
+it again, and use `Start browser`. The Ingress UI displays a Chromium
+screenshot; click the screenshot and type into it to complete redirects, MFA,
+or consent screens, then select `Finish authentication`. The browser context
+and cookies remain in memory only and must be reauthenticated after an app
+restart. Playwright and Alpine Chromium are included in the image.
+
 ## Security and limitations
 
 Only HTTP and HTTPS URLs are accepted. Requests have a configurable timeout.
 Custom headers are supported for pages requiring them; do not put secrets in
 headers if app logs or backups are shared. The page is reduced to plain text
-before matching, and JavaScript-rendered content is not available to this
-lightweight scraper.
+before matching. Browser SSO requires an interactive Ingress session and does
+not support CAPTCHA solving or native browser popups. Browser credentials and
+cookies are not written to disk.
