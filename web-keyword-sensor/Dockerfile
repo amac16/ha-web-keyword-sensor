@@ -1,7 +1,7 @@
 FROM python:3.13-alpine
 
 RUN apk add --no-cache ca-certificates chromium build-base
-RUN pip install --no-cache-dir --disable-pip-version-check paho-mqtt==2.1.0 requests==2.32.4 pyotp==2.9.0 pyee==13.0.0
+RUN pip install --no-cache-dir --disable-pip-version-check paho-mqtt==2.1.0 requests==2.32.4 pyotp==2.9.0 pyee==13.0.0 greenlet==3.2.4
 ARG BUILD_ARCH
 RUN case "${BUILD_ARCH}" in \
       amd64) PLAYWRIGHT_PLATFORM=manylinux1_x86_64 ;; \

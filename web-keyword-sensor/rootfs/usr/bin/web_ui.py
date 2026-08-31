@@ -62,7 +62,7 @@ async function load(){const r=await fetch('./api/checks');const x=await r.json()
 function edit(c){$('id').value=c.id;ids.forEach(k=>$(k)[$(k).type==='checkbox'?'checked':'value']=c[k]??$(k).value);$('username').value='';$('password').value='';$('totp_secret').value='';document.querySelectorAll('.day').forEach(x=>x.checked=(c.days||[]).includes(x.value));$('heading').textContent='Edit check';$('cancel').hidden=false;showBrowser();scrollTo(0,document.body.scrollHeight)}
 function reset(){$('form').reset();$('id').value='';$('time_from').value='00:00';$('time_to').value='23:00';$('auth_mode').value='basic';document.querySelectorAll('.day').forEach(x=>x.checked=true);$('heading').textContent='Add check';$('cancel').hidden=true;showBrowser()}
 async function del(id){if(confirm('Delete this check?')){await fetch('./api/checks/'+encodeURIComponent(id),{method:'DELETE'});load()}}
-$('form').onsubmit=async e=>{e.preventDefault();let c=Object.fromEntries(ids.map(k=>[k,$(k).type==='checkbox'?$(k).checked:$(k).value]));c.id=$('id').value||undefined;c.username=$('username').value;c.password=$('password').value;c.totp_secret=$('totp_secret').value;c.days=[...document.querySelectorAll('.day:checked')].map(x=>x.value);await fetch('./api/checks',{method:c.id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)});reset();load()};
+$('form').onsubmit=async e=>{e.preventDefault();let c=Object.fromEntries(ids.map(k=>[k,$(k).type==='checkbox'?$(k).checked:$(k).value]));c.id=$('id').value||undefined;c.username=$('username').value;c.password=$('password').value;c.totp_secret=$('totp_secret').value;c.days=[...document.querySelectorAll('.day:checked')].map(x=>x.value);let saved=await (await fetch('./api/checks',{method:c.id?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();if(c.auth_mode==='browser'&&c.login_url){edit(saved);$('id').value=saved.id;$('auth_mode').value='browser';showBrowser()}else reset();load()};
 async function browserAction(action,body={}){if(!browserSession)return alert('Start the browser first');let r=await fetch('./api/auth/'+browserSession+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let x=await r.json();if(!r.ok)return alert(x.error||'Browser action failed');if(x.image)$('browser_image').src='data:image/png;base64,'+x.image;load()}
 async function startBrowser(){let r=await fetch('./api/auth/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:$('id').value})});let x=await r.json();if(!r.ok)return alert(x.error||'Unable to start browser');browserSession=x.session;$('browser_image').src='data:image/png;base64,'+x.image}
 function typeBrowser(){browserAction('type',{text:$('browser_text').value})}
@@ -87,6 +87,7 @@ class CheckStore:
         with self.lock: return [dict(x) for x in self.checks]
     def put(self, check):
         with self.lock:
+            check.setdefault("id", uuid.uuid4().hex)
             old = next((x for x in self.checks if x.get("id") == check.get("id")), {})
             for secret in ("username", "password", "totp_secret"):
                 if not check.get(secret): check[secret] = old.get(secret, "")
