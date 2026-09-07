@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.1
+
+- Bumped the app version so Home Assistant rebuilds and installs the visual
+  navigation and verification changes from the latest source.
+
 ## 2.0.0
 
 - Added persisted result verification with thumbs-up and thumbs-down controls.
