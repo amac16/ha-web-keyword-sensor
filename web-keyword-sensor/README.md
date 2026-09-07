@@ -94,7 +94,11 @@ SSO when required.
 
 Auth mode defaults to **None**, which hides all login controls. **Username/password/TOTP**
 can define a login URL, username, password, TOTP secret, login form field names,
-and login success text. Credentials are stored in
+and login success text. The app follows redirects, discovers the login form
+action, and falls back to common email/username, password, and TOTP field names
+when the configured names are not present. It then navigates to the configured
+target URL and rejects a response that still contains a password field.
+Credentials are stored in
 `/data/checks.json` with mode `0600` and are never returned by the management
 API. Leave secret fields blank while editing to preserve existing values. The
 app reports successful authentication in the form and sends a persistent Home

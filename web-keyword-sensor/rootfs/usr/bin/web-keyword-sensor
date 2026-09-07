@@ -2,7 +2,8 @@
 """Scrape configured web pages and publish MQTT discovery entities."""
 import hashlib, html, json, logging, os, re, signal, threading, time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
 import paho.mqtt.client as mqtt
 import pyotp
 import requests
@@ -15,6 +16,28 @@ TAGS = re.compile(r"<[^>]+>")
 SPACE = re.compile(r"\s+")
 UNITS = {"seconds": 1, "minutes": 60, "hours": 3600, "days": 86400, "weeks": 604800}
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+class LoginFormParser(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.action = ""; self.inputs = []
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag == "form" and not self.action: self.action = values.get("action", "")
+        if tag == "input" and values.get("name"): self.inputs.append({"name": values["name"], "type": values.get("type", "text").lower(), "autocomplete": values.get("autocomplete", "").lower()})
+
+def login_form_details(content, base_url):
+    parser = LoginFormParser()
+    try: parser.feed(content)
+    except Exception: return base_url, []
+    return urljoin(base_url, parser.action) if parser.action else base_url, parser.inputs
+
+def choose_login_field(configured, inputs, kind):
+    names = {item["name"] for item in inputs}
+    if configured in names: return configured
+    if kind == "password": candidates = [x for x in inputs if x["type"] == "password"]
+    elif kind == "totp": candidates = [x for x in inputs if any(token in x["name"].lower() for token in ("totp", "otp", "code", "token"))]
+    else: candidates = [x for x in inputs if x["type"] == "email" or x["autocomplete"] in ("username", "email") or any(token in x["name"].lower() for token in ("email", "user", "login"))]
+    return candidates[0]["name"] if candidates else configured
 
 def text(value): return SPACE.sub(" ", html.unescape(TAGS.sub(" ", value))).strip()
 def slug(value): return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or "web_keyword"
@@ -94,16 +117,23 @@ class App:
                 if status >= 400: raise requests.HTTPError(f"browser request failed (HTTP {status})")
             else:
                 with requests.Session() as session:
-                    if check.get("login_url"):
+                    if check.get("auth_mode", "none") == "basic":
                         if not check.get("username") or not check.get("password"):
                             self.auth_failure(check, "credentials are missing"); return {"ok": False, "error": "credentials are missing"}
-                        login = {check.get("username_field", "username"): check["username"], check.get("password_field", "password"): check["password"]}
+                        login_url = check.get("login_url") or check["url"]
+                        login_page = session.get(login_url, headers=headers, timeout=timeout, verify=verify)
+                        action, inputs = login_form_details(login_page.text, login_page.url)
+                        username_field = choose_login_field(check.get("username_field", "username"), inputs, "username")
+                        password_field = choose_login_field(check.get("password_field", "password"), inputs, "password")
+                        login = {username_field: check["username"], password_field: check["password"]}
                         if check.get("totp_secret"):
-                            login[check.get("totp_field", "totp")] = pyotp.TOTP(check["totp_secret"]).now()
-                        auth_response = session.post(check["login_url"], data=login, headers=headers, timeout=timeout, verify=verify, stream=True)
+                            totp_field = choose_login_field(check.get("totp_field", "totp"), inputs, "totp")
+                            login[totp_field] = pyotp.TOTP(check["totp_secret"]).now()
+                        auth_response = session.post(action, data=login, headers=headers, timeout=timeout, verify=verify, stream=True)
                         success_text = check.get("success_text")
                         auth_body = self.read_response(auth_response, max_bytes)
-                        if auth_response.status_code >= 400 or (success_text and success_text not in auth_body):
+                        _, remaining_inputs = login_form_details(auth_body, auth_response.url)
+                        if auth_response.status_code >= 400 or (success_text and success_text not in auth_body) or any(x["type"] == "password" for x in remaining_inputs):
                             self.auth_failure(check, f"login rejected (HTTP {auth_response.status_code})"); return {"ok": False, "error": "login rejected"}
                         check["auth_status"] = "Credentials successful"
                         self.store.put(check)
