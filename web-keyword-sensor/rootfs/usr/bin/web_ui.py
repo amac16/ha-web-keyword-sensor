@@ -152,6 +152,7 @@ class CheckStore:
             if not check: raise ValueError("check not found")
             check["verified"] = bool(verified)
             check["verification_status"] = "verified" if verified else "needs_retest"
+            check["needs_attention"] = not bool(verified)
             check["verified_at"] = time.time()
             self.save()
             return dict(check)

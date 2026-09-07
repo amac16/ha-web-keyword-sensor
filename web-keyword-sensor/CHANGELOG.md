@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.3
+
+- Clearing verification to **Verified** now also removes the **Needs Attention**
+  label from the entity summary.
+
 ## 2.0.2
 
 - Hide verification thumbs when an AI check is already verified while editing.
