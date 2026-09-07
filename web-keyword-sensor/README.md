@@ -103,6 +103,12 @@ model interpret visual calendar entries and other layout-dependent information
 that is missing or ambiguous in raw HTML. If a screenshot cannot be captured,
 the check falls back to text-only evaluation.
 
+Every AI context run, including unattended scheduled runs and manual advanced
+re-tests, uses the bounded vision-guided browser navigation flow. The model may
+scroll or click up to six times before the final evaluation. If it still cannot
+find the requested information, the check is marked **Needs Attention** and
+**Verification: Failed**, prompting the user to revise the instructions.
+
 ## Authentication
 
 Auth mode defaults to **None**, which hides all login controls. **Username/password/TOTP**
