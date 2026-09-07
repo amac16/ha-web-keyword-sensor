@@ -29,9 +29,10 @@ label{display:flex;flex-direction:column;gap:4px;font-weight:600}input,select,bu
 button{background:#1976d2;color:#fff;border:0;border-radius:4px;cursor:pointer}.small{padding:5px 14px;font-size:.9em}.delete{background:#c62828}
 .days{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:10px}.days label{display:block;font-weight:400}
 .browser{grid-column:1/-1;border-top:1px solid #ddd;padding-top:12px}.browser img{display:block;max-width:100%;border:1px solid #777;margin-top:8px}
-.hidden{display:none}.auth-failure{color:#c62828;font-weight:700}
+.hidden{display:none!important}.auth-failure{color:#c62828;font-weight:700}
 .more-prompt{color:#1976d2;text-decoration:underline;cursor:pointer;margin-left:4px;border:0;background:transparent;padding:0;font-size:inherit}
 .advanced-auth{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+.advanced-link{color:#1976d2;background:transparent;border:0;padding:0;text-decoration:underline;cursor:pointer;font-size:inherit;align-self:end;text-align:left}
 </style>
 <h1>Web Keyword Sensor</h1>
 <p>Manage page checks. Changes are saved immediately.</p><div id="list"></div>
@@ -52,7 +53,7 @@ button{background:#1976d2;color:#fff;border:0;border-radius:4px;cursor:pointer}.
 <label>Auth mode<select id="auth_mode"><option value="none" selected>None</option><option value="basic">Username/password/TOTP</option><option value="browser">Browser SSO</option></select></label>
 <label class="auth-basic">Login URL (optional)<input id="login_url" type="url"></label>
 <label class="auth-basic">Username<input id="username" autocomplete="username"></label><label class="auth-basic">Password<input id="password" type="password" autocomplete="current-password"></label>
-<label class="auth-basic">TOTP secret<input id="totp_secret" type="password" placeholder="Optional"></label><button type="button" class="auth-basic small" onclick="showAdvanced()">Advanced</button>
+<label class="auth-basic">TOTP secret<input id="totp_secret" type="password" placeholder="Optional"></label><button type="button" class="auth-basic advanced-link" onclick="showAdvanced()">Advanced</button>
 <div id="advanced_auth" class="auth-basic advanced-auth hidden"><label>Username field<input id="username_field" value="username"></label><label>Password field<input id="password_field" value="password"></label><label>TOTP field<input id="totp_field" value="totp"></label><label>Login success text<input id="success_text"></label></div>
 <label><input id="case_sensitive" type="checkbox"> Case sensitive</label>
 <label><input id="verify_ssl" type="checkbox" checked> Verify TLS</label><label><input id="enabled" type="checkbox" checked> Enabled</label>
@@ -67,7 +68,7 @@ const ids=['name','url','phrase','entity_type','match_mode','ai_profile_id','con
 const $=x=>document.getElementById(x);let browserSession='',checkCache={};
 const esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 for(const id of ['time_from','time_to'])for(let h=0;h<24;h++){let o=document.createElement('option');o.value=String(h).padStart(2,'0')+':00';o.textContent=o.value;$(id).append(o)}
-function showAuth(){let mode=$('auth_mode').value;document.querySelectorAll('.auth-basic').forEach(x=>x.classList.toggle('hidden',mode!=='basic'));$('browser').classList.toggle('hidden',mode!=='browser')}
+function showAuth(){let mode=$('auth_mode').value;document.querySelectorAll('.auth-basic').forEach(x=>{if(x.id!=='advanced_auth')x.classList.toggle('hidden',mode!=='basic')});if(mode!=='basic')$('advanced_auth').classList.add('hidden');$('browser').classList.toggle('hidden',mode!=='browser')}
 function showAdvanced(){$('advanced_auth').classList.toggle('hidden')}
 $('auth_mode').onchange=showAuth;
 function showContext(){document.querySelectorAll('.context').forEach(x=>x.classList.toggle('hidden',$('match_mode').value!=='ai_context'))}

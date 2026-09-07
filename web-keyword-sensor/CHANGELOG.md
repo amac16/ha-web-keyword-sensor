@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.8.4
+
+- Advanced the release version after the authentication form usability fix.
+
+## 1.8.3
+
+- Fixed Advanced fields being revealed automatically when Username/password/TOTP
+  mode was selected.
+
+## 1.8.2
+
+- Fixed the Advanced authentication fields toggle by ensuring hidden layout
+  elements remain hidden until opened.
+- Styled **Advanced** as a compact hyperlink-style control.
+
 ## 1.8.1
 
 - Advanced the app version after the authenticated-navigation improvements.
