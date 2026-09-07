@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.0
+
+- Hardened authenticated navigation for username/password checks.
+- The app now opens the login page, follows the form action, auto-detects
+  common email/username, password, and TOTP field names, then navigates to the
+  configured target URL and rejects a response that still shows a login form.
+- `None` authentication now always performs a direct unauthenticated fetch.
+
 ## 1.7.3
 
 - Fixed the `...less` prompt control by using delegated click handling after
