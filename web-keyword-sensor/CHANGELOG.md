@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.2
+
+- Hide verification thumbs when an AI check is already verified while editing.
+- Always show the re-check control in edit mode and restore thumbs after the
+  re-check completes.
+- Color verified status green and failed/pending verification red.
+
 ## 2.0.1
 
 - Bumped the app version so Home Assistant rebuilds and installs the visual
