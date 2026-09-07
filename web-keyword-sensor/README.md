@@ -79,6 +79,13 @@ the normal MQTT state, and displays the resulting state and match value in the
 management page. A failed test reports an error instead of publishing a false
 negative result.
 
+After a test, use 👍 to mark the result **Verified** or 👎 to mark it as needing
+review. A rejected AI result exposes **↻ Re-Test?**, which launches a bounded
+vision-guided browser re-test. The selected model may click or scroll the
+authenticated page to locate the requested information; it cannot enter stored
+credentials or use destructive controls. The result is presented for a new
+verification decision.
+
 AI binary sensors publish `ON`/`OFF`. AI text sensors publish the model's short
 summary as their state and put bounded findings in MQTT attributes. Provider
 errors mark the entity unavailable without replacing its last state. AI checks
@@ -89,6 +96,12 @@ AI calls may incur provider charges and may disclose private page contents.
 The app does not ask the AI provider to browse the web: it sends the text
 retrieved from the configured page. JavaScript-rendered pages should use Browser
 SSO when required.
+
+AI context checks also capture the rendered page when possible and send the
+authenticated screenshot to the selected vision-capable model. This lets the
+model interpret visual calendar entries and other layout-dependent information
+that is missing or ambiguous in raw HTML. If a screenshot cannot be captured,
+the check falls back to text-only evaluation.
 
 ## Authentication
 

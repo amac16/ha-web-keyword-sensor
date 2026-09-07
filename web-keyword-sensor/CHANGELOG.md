@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.0.0
+
+- Added persisted result verification with thumbs-up and thumbs-down controls.
+- Added an advanced browser re-test flow that uses the selected vision model to
+  inspect screenshots and choose safe clicks or scrolls before reevaluating the
+  page.
+- Added verification status and re-test controls to the check summary.
+
+## 1.9.0
+
+- Added visual page capture for AI context checks.
+- OpenAI, Google, and Claude evaluations can now receive the authenticated
+  page screenshot as well as page text, allowing models to interpret calendar
+  cards, layout, labels, and rendered values.
+- Added browser-based capture for no-auth and username/password checks, with a
+  text-only fallback if visual capture is unavailable.
+
 ## 1.8.4
 
 - Advanced the release version after the authentication form usability fix.

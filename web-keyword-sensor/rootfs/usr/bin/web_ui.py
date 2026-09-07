@@ -12,6 +12,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+import pyotp
 
 LOG = logging.getLogger("web_keyword_sensor.ui")
 
@@ -33,6 +34,7 @@ button{background:#1976d2;color:#fff;border:0;border-radius:4px;cursor:pointer}.
 .more-prompt{color:#1976d2;text-decoration:underline;cursor:pointer;margin-left:4px;border:0;background:transparent;padding:0;font-size:inherit}
 .advanced-auth{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
 .advanced-link{color:#1976d2;background:transparent;border:0;padding:0;text-decoration:underline;cursor:pointer;font-size:inherit;align-self:end;text-align:left}
+.feedback{margin-top:4px}.feedback button{background:transparent;border:0;padding:2px 5px;font-size:1.05em;cursor:pointer}.feedback .up{color:#198754}.feedback .down{color:#dc3545}.feedback .retest{color:#1976d2;text-decoration:underline;font-size:.9em}
 </style>
 <h1>Web Keyword Sensor</h1>
 <p>Manage page checks. Changes are saved immediately.</p><div id="list"></div>
@@ -75,13 +77,16 @@ function showContext(){document.querySelectorAll('.context').forEach(x=>x.classL
 $('match_mode').onchange=showContext;
 function schedule(c){let days=(c.days||[]).map(x=>x.slice(0,3)).join(', ')||'no days';return `${days} · ${c.time_from||'00:00'}–${c.time_to||'23:00'}`}
 function dateTime(value,empty){return value?new Date(value*1000).toLocaleString():empty}
+function verification(c){return c.verification_status==='verified'?'Verification: Verified':c.verification_status==='needs_retest'?'Verification: Needs re-test':''}
 function promptPreview(c,expanded=false){let value=c.context_prompt||c.phrase||'';if(value.length<=250)return esc(value);return esc(expanded?value:value.slice(0,250))+'... <button type="button" class="more-prompt" data-id="'+esc(c.id)+'" data-expanded="'+expanded+'">'+(expanded?'...less':'more...')+'</button>'}
 function renderPrompt(c,expanded=false){return promptPreview(c,expanded)+'<br>'+esc(c.url)+'<br><span class="'+(String(c.auth_status||'').startsWith('Authentication failed')?'auth-failure':'')+'">'+esc(c.auth_status||'Not tested')+'</span>'}
 async function loadProfiles(){const x=await (await fetch('./api/ai-profiles')).json();$('ai_profile_id').innerHTML=x.filter(p=>p.enabled).map(p=>`<option value="${esc(p.id)}">${esc(p.name)} (${esc(p.provider)} / ${esc(p.model)})</option>`).join('')||'<option value="">No enabled AI profiles</option>';$('profiles').innerHTML=x.map(p=>`<p>${esc(p.name)} · ${esc(p.provider)} / ${esc(p.model)} · ${p.api_key_configured?'key configured':'missing key'} <button type="button" onclick='editProfile(${JSON.stringify(p)})'>Edit</button> <button type="button" class="delete" onclick='delProfile("${esc(p.id)}")'>Delete</button></p>`).join('')||'<p>No profiles configured.</p>';showContext()}
 function editProfile(p){$('profile_form').classList.remove('hidden');$('profile_id').value=p.id;$('profile_name').value=p.name;$('profile_provider').value=p.provider;$('profile_model').value=p.model;$('profile_key').value='';$('profile_test_status').textContent='';scrollTo(0,0)}
 function showProfileForm(){$('profile_form').classList.remove('hidden');$('profile_id').value='';$('profile_form').reset();$('profile_id').value='';$('profile_test_status').textContent='';$('profile_name').focus()}
-async function load(){const r=await fetch('./api/checks');const x=await r.json();checkCache=Object.fromEntries(x.map(c=>[c.id,c]));$('list').innerHTML=x.map(c=>`<div class="card"><h2>${esc(c.name)}</h2><p>${esc(c.entity_type)} · ${c.match_mode==='ai_context'?'AI context':'exact phrase'} · every ${c.interval} ${esc(c.unit)} · ${c.enabled?'enabled':'disabled'}</p><p>Schedule: ${esc(schedule(c))}</p><p>Last Ran: ${esc(dateTime(c.last_ran_at,'Never'))}<br>Next Run: ${esc(dateTime(c.next_run_at,'Pending first run'))}</p><p class="prompt-preview" data-id="${esc(c.id)}">${renderPrompt(c)}</p><button class="edit-check" data-id="${esc(c.id)}">Edit</button> <button class="test-check" data-id="${esc(c.id)}">Test</button> <button class="delete delete-check" data-id="${esc(c.id)}">Delete</button><p class="test-result" id="test-${esc(c.id)}"></p></div>`).join('')||'<p>No checks configured.</p>';document.querySelectorAll('.edit-check').forEach(b=>b.onclick=()=>edit(checkCache[b.dataset.id]));document.querySelectorAll('.test-check').forEach(b=>b.onclick=()=>testCheck(b,b.dataset.id));document.querySelectorAll('.delete-check').forEach(b=>b.onclick=()=>del(b.dataset.id));$('list').onclick=e=>{let b=e.target.closest('.more-prompt');if(!b)return;e.preventDefault();let c=checkCache[b.dataset.id];b.parentElement.innerHTML=renderPrompt(c,b.dataset.expanded!=='true')};loadProfiles()}
-async function testCheck(button,id){button.disabled=true;let out=$('test-'+id);out.textContent='Running...';try{let r=await fetch('./api/checks/'+encodeURIComponent(id)+'/test',{method:'POST'});let x=await r.json();if(x.ok){out.textContent='Result: state='+x.state+' · matched='+x.attributes.matched}else out.textContent='Test failed: '+(x.error||'unknown error')}catch(e){out.textContent='Test failed: request error'}finally{button.disabled=false}}
+async function load(){const r=await fetch('./api/checks');const x=await r.json();checkCache=Object.fromEntries(x.map(c=>[c.id,c]));$('list').innerHTML=x.map(c=>`<div class="card"><h2>${esc(c.name)}</h2><p>${esc(c.entity_type)} · ${c.match_mode==='ai_context'?'AI context':'exact phrase'} · every ${c.interval} ${esc(c.unit)} · ${c.enabled?'enabled':'disabled'}</p><p>Schedule: ${esc(schedule(c))}</p><p>Last Ran: ${esc(dateTime(c.last_ran_at,'Never'))}<br>Next Run: ${esc(dateTime(c.next_run_at,'Pending first run'))}${verification(c)?'<br>'+esc(verification(c)):''}</p><p class="prompt-preview" data-id="${esc(c.id)}">${renderPrompt(c)}</p><button class="edit-check" data-id="${esc(c.id)}">Edit</button> <button class="test-check" data-id="${esc(c.id)}">Test</button> <button class="delete delete-check" data-id="${esc(c.id)}">Delete</button><p class="test-result" id="test-${esc(c.id)}"></p><div class="feedback" id="feedback-${esc(c.id)}">${c.verification_status==='needs_retest'?feedback(c.id,true):''}</div></div>`).join('')||'<p>No checks configured.</p>';document.querySelectorAll('.edit-check').forEach(b=>b.onclick=()=>edit(checkCache[b.dataset.id]));document.querySelectorAll('.test-check').forEach(b=>b.onclick=()=>testCheck(b,b.dataset.id));document.querySelectorAll('.delete-check').forEach(b=>b.onclick=()=>del(b.dataset.id));$('list').onclick=e=>{let f=e.target.closest('[data-feedback]');if(f){e.preventDefault();if(f.dataset.feedback==='retest')return testCheck(f,f.dataset.id,true);return verifyCheck(f.dataset.id,f.dataset.feedback==='up')}let b=e.target.closest('.more-prompt');if(!b)return;e.preventDefault();let c=checkCache[b.dataset.id];b.parentElement.innerHTML=renderPrompt(c,b.dataset.expanded!=='true')};loadProfiles()}
+function feedback(id,showRetest=false){return '<button class="up" title="Verify result" aria-label="Verify result" data-feedback="up" data-id="'+esc(id)+'">👍</button><button class="down" title="Result is incorrect" aria-label="Result is incorrect" data-feedback="down" data-id="'+esc(id)+'">👎</button><button class="retest '+(showRetest?'':'hidden')+'" data-feedback="retest" data-id="'+esc(id)+'">↻ Re-Test?</button>'}
+async function verifyCheck(id,verified){let r=await fetch('./api/checks/'+encodeURIComponent(id)+'/verification',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({verified})});if(!r.ok)return;let x=await r.json();checkCache[id]=x.check;load()}
+async function testCheck(button,id,advanced=false){button.disabled=true;let out=$('test-'+id);out.textContent=advanced?'Running advanced browser re-test...':'Running...';try{let r=await fetch('./api/checks/'+encodeURIComponent(id)+(advanced?'/retest':'/test'),{method:'POST'});let x=await r.json();if(x.ok){out.textContent='Result: state='+x.state+' · matched='+x.attributes.matched;$('feedback-'+id).innerHTML=feedback(id,checkCache[id]?.verification_status==='needs_retest')}else out.textContent='Test failed: '+(x.error||'unknown error')}catch(e){out.textContent='Test failed: request error'}finally{button.disabled=false}}
 function edit(c){$('id').value=c.id;ids.forEach(k=>$(k)[$(k).type==='checkbox'?'checked':'value']=c[k]??$(k).value);$('auth_mode').value=c.auth_mode||(c.login_url?'basic':'none');$('username').value=c.username||'';$('password').value='';$('password').placeholder=c.login_configured?'******** (stored)':'Password';$('totp_secret').value='';$('advanced_auth').classList.add('hidden');document.querySelectorAll('.day').forEach(x=>x.checked=(c.days||[]).includes(x.value));$('heading').textContent='Edit check';$('cancel').hidden=false;showAuth();showContext();scrollTo(0,document.body.scrollHeight)}
 function reset(){$('form').reset();$('id').value='';$('time_from').value='00:00';$('time_to').value='23:00';$('auth_mode').value='none';$('match_mode').value='literal';$('password').placeholder='Password';$('advanced_auth').classList.add('hidden');document.querySelectorAll('.day').forEach(x=>x.checked=true);$('heading').textContent='Add check';$('cancel').hidden=true;showAuth();showContext()}
 async function del(id){if(confirm('Delete this check?')){await fetch('./api/checks/'+encodeURIComponent(id),{method:'DELETE'});load()}}
@@ -133,6 +138,15 @@ class CheckStore:
             self.save()
     def delete(self, ident):
         with self.lock: self.checks = [x for x in self.checks if x.get("id") != ident]; self.save()
+    def set_verification(self, ident, verified):
+        with self.lock:
+            check = next((x for x in self.checks if x.get("id") == ident), None)
+            if not check: raise ValueError("check not found")
+            check["verified"] = bool(verified)
+            check["verification_status"] = "verified" if verified else "needs_retest"
+            check["verified_at"] = time.time()
+            self.save()
+            return dict(check)
 
 
 class AIProfileStore:
@@ -271,6 +285,100 @@ class BrowserSessions:
             with self.lock: self.authenticated[session["check"]["id"]] = session
             return await self.image(session)
     def fetch(self, check): return self._run(self._fetch(check))
+    def visual_fetch(self, check): return self._run(self._visual_fetch(check), timeout=90)
+    def advanced_retest(self, check, profile): return self._run(self._advanced_retest(check, profile), timeout=180)
+    async def _visual_fetch(self, check):
+        if check.get("auth_mode", "none") == "browser":
+            status, _ = await self._fetch(check)
+            with self.lock: session = self.authenticated.get(check.get("id"))
+            if not session: raise ValueError("browser session is unavailable")
+            image = base64.b64encode(await session["page"].screenshot(type="png", timeout=10000)).decode()
+            content = await session["page"].evaluate("document.body ? document.body.innerText.slice(0, 16777216) : ''")
+            return status, content, image
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start(); browser = None; context = None
+        try:
+            browser = await pw.chromium.launch(headless=True, executable_path=next((p for p in ("/usr/bin/chromium", "/usr/bin/chromium-browser") if os.path.exists(p)), None))
+            context = await browser.new_context(ignore_https_errors=not check.get("verify_ssl", True)); page = await context.new_page()
+            response = await page.goto(check.get("login_url") or check["url"], wait_until="domcontentloaded", timeout=30000)
+            if check.get("auth_mode", "none") == "basic":
+                inputs = await page.locator("input").evaluate_all("""(items) => items.map((x, i) => ({i, name:x.name || '', type:(x.type || 'text').toLowerCase(), autocomplete:(x.autocomplete || '').toLowerCase()}))""")
+                def pick(kind, configured):
+                    for item in inputs:
+                        if item["name"] == configured: return item["i"]
+                    for item in inputs:
+                        name = item["name"].lower()
+                        if kind == "password" and item["type"] == "password": return item["i"]
+                        if kind == "username" and (item["type"] == "email" or item["autocomplete"] in ("username", "email") or any(x in name for x in ("email", "user", "login"))): return item["i"]
+                        if kind == "totp" and any(x in name for x in ("totp", "otp", "code", "token")): return item["i"]
+                    return None
+                username = pick("username", check.get("username_field", "username")); password = pick("password", check.get("password_field", "password"))
+                if username is None or password is None: raise ValueError("login fields were not found in browser page")
+                await page.locator("input").nth(username).fill(check["username"]); await page.locator("input").nth(password).fill(check["password"])
+                if check.get("totp_secret"):
+                    totp = pick("totp", check.get("totp_field", "totp"))
+                    if totp is not None: await page.locator("input").nth(totp).fill(pyotp.TOTP(check["totp_secret"]).now())
+                submit = page.locator("form").first.locator("button[type=submit], input[type=submit], button").first
+                if await submit.count(): await submit.click()
+                else: await page.keyboard.press("Enter")
+                await page.wait_for_load_state("domcontentloaded", timeout=30000)
+                response = await page.goto(check["url"], wait_until="domcontentloaded", timeout=30000)
+            if not response: raise ValueError("browser did not return a response")
+            image = base64.b64encode(await page.screenshot(type="png", timeout=10000)).decode()
+            content = await page.evaluate("document.body ? document.body.innerText.slice(0, 16777216) : ''")
+            return response.status, content, image
+        finally:
+            if context:
+                try: await context.close()
+                except Exception: pass
+            if browser:
+                try: await browser.close()
+                except Exception: pass
+            await pw.stop()
+    async def _advanced_retest(self, check, profile):
+        from ai_providers import navigate
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True, executable_path=next((p for p in ("/usr/bin/chromium", "/usr/bin/chromium-browser") if os.path.exists(p)), None))
+        context = await browser.new_context(ignore_https_errors=not check.get("verify_ssl", True)); page = await context.new_page()
+        try:
+            response = await page.goto(check.get("login_url") or check["url"], wait_until="domcontentloaded", timeout=30000)
+            if check.get("auth_mode", "none") == "basic":
+                inputs = await page.locator("input").evaluate_all("""(items) => items.map((x, i) => ({i, name:x.name || '', type:(x.type || 'text').toLowerCase(), autocomplete:(x.autocomplete || '').toLowerCase()}))""")
+                def pick(kind, configured):
+                    for item in inputs:
+                        if item["name"] == configured: return item["i"]
+                    for item in inputs:
+                        name = item["name"].lower()
+                        if kind == "password" and item["type"] == "password": return item["i"]
+                        if kind == "username" and (item["type"] == "email" or item["autocomplete"] in ("username", "email") or any(x in name for x in ("email", "user", "login"))): return item["i"]
+                        if kind == "totp" and any(x in name for x in ("totp", "otp", "code", "token")): return item["i"]
+                    return None
+                username = pick("username", check.get("username_field", "username")); password = pick("password", check.get("password_field", "password"))
+                if username is None or password is None: raise ValueError("login fields were not found in browser page")
+                await page.locator("input").nth(username).fill(check["username"]); await page.locator("input").nth(password).fill(check["password"])
+                if check.get("totp_secret"):
+                    totp = pick("totp", check.get("totp_field", "totp"))
+                    if totp is not None: await page.locator("input").nth(totp).fill(pyotp.TOTP(check["totp_secret"]).now())
+                submit = page.locator("form").first.locator("button[type=submit], input[type=submit], button").first
+                if await submit.count(): await submit.click()
+                else: await page.keyboard.press("Enter")
+                await page.wait_for_load_state("domcontentloaded", timeout=30000)
+                response = await page.goto(check["url"], wait_until="domcontentloaded", timeout=30000)
+            if not response: raise ValueError("browser did not return a response")
+            for _ in range(6):
+                image = base64.b64encode(await page.screenshot(type="png", timeout=10000)).decode()
+                text = await page.evaluate("document.body ? document.body.innerText.slice(0, 16777216) : ''")
+                action = await asyncio.to_thread(navigate, profile, check.get("context_prompt", ""), text, image, page.url, profile.get("timeout", 45))
+                if action["action"] == "done": break
+                if action["action"] == "click": await page.mouse.click(action["x"], action["y"])
+                elif action["action"] == "scroll": await page.mouse.wheel(0, action["amount"])
+                await page.wait_for_timeout(1000)
+            final = await page.screenshot(type="png", timeout=10000)
+            final_text = await page.evaluate("document.body ? document.body.innerText.slice(0, 16777216) : ''")
+            return response.status, final_text, base64.b64encode(final).decode()
+        finally:
+            await context.close(); await browser.close(); await pw.stop()
     async def _fetch(self, check):
         with self.lock: session = self.authenticated.get(check.get("id"))
         if session and session["expires"] < time.time():
@@ -311,7 +419,7 @@ def notify_auth_failure(check, reason):
         requests.post("http://supervisor/core/api/services/persistent_notification/create", headers={"Authorization": "Bearer " + token}, json={"title": "Web Keyword Sensor authentication failure", "message": "Authentication failed for %s: %s" % (check.get("name", "unnamed"), reason)}, timeout=10)
     except Exception: pass
 
-def start_server(store, browser_sessions=None, ai_profiles=None, test_check=None):
+def start_server(store, browser_sessions=None, ai_profiles=None, test_check=None, retest_check=None):
     if browser_sessions is None: browser_sessions = BrowserSessions(store)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args): pass
@@ -332,6 +440,10 @@ def start_server(store, browser_sessions=None, ai_profiles=None, test_check=None
         def do_POST(self):
             path = urlparse(self.path).path
             try:
+                if path.startswith("/api/checks/") and path.endswith("/retest"):
+                    ident = unquote(path[len("/api/checks/"):-len("/retest")]); self.reply(retest_check(ident) if retest_check else {"ok": False, "error": "advanced testing is unavailable"}); return
+                if path.startswith("/api/checks/") and path.endswith("/verification"):
+                    ident = unquote(path[len("/api/checks/"):-len("/verification")]); body = self.body(); store.set_verification(ident, body.get("verified", False)); self.reply({"ok": True, "check": next(x for x in store.get() if x.get("id") == ident)}); return
                 if path.startswith("/api/checks/") and path.endswith("/test"):
                     ident = unquote(path[len("/api/checks/"):-len("/test")]); self.reply(test_check(ident) if test_check else {"ok": False, "error": "check testing is unavailable"}); return
                 if path == "/api/checks":

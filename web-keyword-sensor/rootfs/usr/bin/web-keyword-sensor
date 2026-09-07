@@ -159,8 +159,20 @@ class App:
             if check.get("match_mode") == "ai_context":
                 profile = next((x for x in self.ai_profiles.get_runtime() if x.get("id") == check.get("ai_profile_id") and x.get("enabled", True)), None)
                 if not profile: self.ai_unavailable(check, state_topic, "AI profile is missing or disabled"); return {"ok": False, "error": "AI profile is missing or disabled"}
+                image_data = None
+                try:
+                    visual_status, visual_text, image_data = self.browser.visual_fetch(check)
+                    if visual_text: page_text = visual_text
+                    if status is None: status = visual_status
+                except Exception as error:
+                    LOG.warning("%s: visual page capture unavailable; using text only: %s", check.get("name", "unnamed"), error)
                 with self.ai_lock:
-                    result = evaluate(profile, check.get("context_prompt", ""), page_text, profile.get("timeout", self.options.get("request_timeout", 30)))
+                    try:
+                        result = evaluate(profile, check.get("context_prompt", ""), page_text, profile.get("timeout", self.options.get("request_timeout", 30)), image_data)
+                    except Exception:
+                        if not image_data: raise
+                        LOG.warning("%s: visual AI evaluation failed; retrying with text only", check.get("name", "unnamed"))
+                        result = evaluate(profile, check.get("context_prompt", ""), page_text, profile.get("timeout", self.options.get("request_timeout", 30)))
                 found = result["match"]
                 value = ("ON" if found else "OFF") if check["entity_type"] == "binary_sensor" else (result["summary"] or ("Relevant information found." if found else "No relevant information found."))
                 attrs = {"url": check["url"], "match_mode": "ai_context", "matched": found, "summary": result["summary"], "findings": result["findings"], "checked_at": int(time.time()), "http_status": status, "ai_profile": profile.get("name", profile.get("id")), "ai_model": profile.get("model")}
@@ -214,6 +226,35 @@ class App:
         finally:
             self.mark_next_run(check)
             with self.state_lock: self.running.discard(ident_)
+    def retest_check(self, ident_):
+        check = next((x for x in self.store.get_runtime() if x.get("id") == ident_), None)
+        if not check or check.get("match_mode") != "ai_context": return {"ok": False, "error": "advanced re-test requires an AI context check"}
+        profile = next((x for x in self.ai_profiles.get_runtime() if x.get("id") == check.get("ai_profile_id") and x.get("enabled", True)), None)
+        if not profile: return {"ok": False, "error": "AI profile is missing or disabled"}
+        with self.state_lock:
+            if ident_ in self.running: return {"ok": False, "error": "check is already running"}
+            if ident_ not in self.known:
+                try: self.known[ident_] = self.discovery(check)
+                except Exception: return {"ok": False, "error": "unable to publish discovery"}
+            self.running.add(ident_)
+        state_topic = self.known[ident_]
+        try:
+            self.mark_run_start(check)
+            status, page_text, image = self.browser.advanced_retest(check, profile)
+            with self.ai_lock: result = evaluate(profile, check.get("context_prompt", ""), page_text, profile.get("timeout", self.options.get("request_timeout", 30)), image)
+            found = result["match"]
+            value = "ON" if check["entity_type"] == "binary_sensor" and found else "OFF" if check["entity_type"] == "binary_sensor" else result["summary"] or ("Relevant information found." if found else "No relevant information found.")
+            attrs = {"url": check["url"], "match_mode": "ai_context", "matched": found, "summary": result["summary"], "findings": result["findings"], "checked_at": int(time.time()), "http_status": status, "ai_profile": profile.get("name", profile.get("id")), "ai_model": profile.get("model"), "advanced_retest": True}
+            base = state_topic.rsplit("/", 1)[0]
+            self.client.publish(base + "/availability", "online", qos=1, retain=True); self.client.publish(state_topic, value, qos=1, retain=True); self.client.publish(base + "/attributes", json.dumps(attrs), qos=1, retain=True)
+            return {"ok": True, "state": value, "attributes": attrs}
+        except Exception as error:
+            self.ai_unavailable(check, state_topic, "advanced AI evaluation failed")
+            LOG.exception("%s: advanced re-test failed", check.get("name", "unnamed"))
+            return {"ok": False, "error": "advanced re-test failed: " + str(error)[:300]}
+        finally:
+            self.mark_next_run(check)
+            with self.state_lock: self.running.discard(ident_)
     @staticmethod
     def read_response(response, max_bytes):
         data = bytearray()
@@ -232,7 +273,7 @@ class App:
                 requests.post("http://supervisor/core/api/services/persistent_notification/create", headers={"Authorization": f"Bearer {token}"}, json={"title": "Web Keyword Sensor authentication failure", "message": f"Authentication failed for {check.get('name', 'unnamed')}: {reason}"}, timeout=10)
             except requests.RequestException: LOG.warning("Unable to create Home Assistant notification")
     def start(self):
-        self.connect(); start_server(self.store, self.browser, self.ai_profiles, self.test_check); LOG.info("Web form available through app ingress")
+        self.connect(); start_server(self.store, self.browser, self.ai_profiles, self.test_check, self.retest_check); LOG.info("Web form available through app ingress")
         while not STOP.wait(1):
             now = time.monotonic(); current = set()
             for check in self.store.get_runtime():
