@@ -31,6 +31,7 @@ button{background:#1976d2;color:#fff;border:0;border-radius:4px;cursor:pointer}.
 .browser{grid-column:1/-1;border-top:1px solid #ddd;padding-top:12px}.browser img{display:block;max-width:100%;border:1px solid #777;margin-top:8px}
 .hidden{display:none}.auth-failure{color:#c62828;font-weight:700}
 .more-prompt{color:#1976d2;text-decoration:underline;cursor:pointer;margin-left:4px;border:0;background:transparent;padding:0;font-size:inherit}
+.advanced-auth{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
 </style>
 <h1>Web Keyword Sensor</h1>
 <p>Manage page checks. Changes are saved immediately.</p><div id="list"></div>
@@ -51,9 +52,9 @@ button{background:#1976d2;color:#fff;border:0;border-radius:4px;cursor:pointer}.
 <label>Auth mode<select id="auth_mode"><option value="none" selected>None</option><option value="basic">Username/password/TOTP</option><option value="browser">Browser SSO</option></select></label>
 <label class="auth-basic">Login URL (optional)<input id="login_url" type="url"></label>
 <label class="auth-basic">Username<input id="username" autocomplete="username"></label><label class="auth-basic">Password<input id="password" type="password" autocomplete="current-password"></label>
-<label class="auth-basic">TOTP secret<input id="totp_secret" type="password" placeholder="Optional"></label><label class="auth-basic">Username field<input id="username_field" value="username"></label>
-<label class="auth-basic">Password field<input id="password_field" value="password"></label><label class="auth-basic">TOTP field<input id="totp_field" value="totp"></label>
-<label class="auth-basic">Login success text<input id="success_text"></label><label><input id="case_sensitive" type="checkbox"> Case sensitive</label>
+<label class="auth-basic">TOTP secret<input id="totp_secret" type="password" placeholder="Optional"></label><button type="button" class="auth-basic small" onclick="showAdvanced()">Advanced</button>
+<div id="advanced_auth" class="auth-basic advanced-auth hidden"><label>Username field<input id="username_field" value="username"></label><label>Password field<input id="password_field" value="password"></label><label>TOTP field<input id="totp_field" value="totp"></label><label>Login success text<input id="success_text"></label></div>
+<label><input id="case_sensitive" type="checkbox"> Case sensitive</label>
 <label><input id="verify_ssl" type="checkbox" checked> Verify TLS</label><label><input id="enabled" type="checkbox" checked> Enabled</label>
 <div><button type="submit">Save check</button> <button type="button" id="cancel" onclick="reset()" hidden>Cancel</button></div>
 <div id="browser" class="browser hidden"><b>Browser SSO</b><p>Start the browser, then complete the provider login in the screenshot below.</p>
@@ -67,6 +68,7 @@ const $=x=>document.getElementById(x);let browserSession='',checkCache={};
 const esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 for(const id of ['time_from','time_to'])for(let h=0;h<24;h++){let o=document.createElement('option');o.value=String(h).padStart(2,'0')+':00';o.textContent=o.value;$(id).append(o)}
 function showAuth(){let mode=$('auth_mode').value;document.querySelectorAll('.auth-basic').forEach(x=>x.classList.toggle('hidden',mode!=='basic'));$('browser').classList.toggle('hidden',mode!=='browser')}
+function showAdvanced(){$('advanced_auth').classList.toggle('hidden')}
 $('auth_mode').onchange=showAuth;
 function showContext(){document.querySelectorAll('.context').forEach(x=>x.classList.toggle('hidden',$('match_mode').value!=='ai_context'))}
 $('match_mode').onchange=showContext;
@@ -79,8 +81,8 @@ function editProfile(p){$('profile_form').classList.remove('hidden');$('profile_
 function showProfileForm(){$('profile_form').classList.remove('hidden');$('profile_id').value='';$('profile_form').reset();$('profile_id').value='';$('profile_test_status').textContent='';$('profile_name').focus()}
 async function load(){const r=await fetch('./api/checks');const x=await r.json();checkCache=Object.fromEntries(x.map(c=>[c.id,c]));$('list').innerHTML=x.map(c=>`<div class="card"><h2>${esc(c.name)}</h2><p>${esc(c.entity_type)} · ${c.match_mode==='ai_context'?'AI context':'exact phrase'} · every ${c.interval} ${esc(c.unit)} · ${c.enabled?'enabled':'disabled'}</p><p>Schedule: ${esc(schedule(c))}</p><p>Last Ran: ${esc(dateTime(c.last_ran_at,'Never'))}<br>Next Run: ${esc(dateTime(c.next_run_at,'Pending first run'))}</p><p class="prompt-preview" data-id="${esc(c.id)}">${renderPrompt(c)}</p><button class="edit-check" data-id="${esc(c.id)}">Edit</button> <button class="test-check" data-id="${esc(c.id)}">Test</button> <button class="delete delete-check" data-id="${esc(c.id)}">Delete</button><p class="test-result" id="test-${esc(c.id)}"></p></div>`).join('')||'<p>No checks configured.</p>';document.querySelectorAll('.edit-check').forEach(b=>b.onclick=()=>edit(checkCache[b.dataset.id]));document.querySelectorAll('.test-check').forEach(b=>b.onclick=()=>testCheck(b,b.dataset.id));document.querySelectorAll('.delete-check').forEach(b=>b.onclick=()=>del(b.dataset.id));$('list').onclick=e=>{let b=e.target.closest('.more-prompt');if(!b)return;e.preventDefault();let c=checkCache[b.dataset.id];b.parentElement.innerHTML=renderPrompt(c,b.dataset.expanded!=='true')};loadProfiles()}
 async function testCheck(button,id){button.disabled=true;let out=$('test-'+id);out.textContent='Running...';try{let r=await fetch('./api/checks/'+encodeURIComponent(id)+'/test',{method:'POST'});let x=await r.json();if(x.ok){out.textContent='Result: state='+x.state+' · matched='+x.attributes.matched}else out.textContent='Test failed: '+(x.error||'unknown error')}catch(e){out.textContent='Test failed: request error'}finally{button.disabled=false}}
-function edit(c){$('id').value=c.id;ids.forEach(k=>$(k)[$(k).type==='checkbox'?'checked':'value']=c[k]??$(k).value);$('auth_mode').value=c.auth_mode||(c.login_url?'basic':'none');$('username').value='';$('password').value='';$('totp_secret').value='';document.querySelectorAll('.day').forEach(x=>x.checked=(c.days||[]).includes(x.value));$('heading').textContent='Edit check';$('cancel').hidden=false;showAuth();showContext();scrollTo(0,document.body.scrollHeight)}
-function reset(){$('form').reset();$('id').value='';$('time_from').value='00:00';$('time_to').value='23:00';$('auth_mode').value='none';$('match_mode').value='literal';document.querySelectorAll('.day').forEach(x=>x.checked=true);$('heading').textContent='Add check';$('cancel').hidden=true;showAuth();showContext()}
+function edit(c){$('id').value=c.id;ids.forEach(k=>$(k)[$(k).type==='checkbox'?'checked':'value']=c[k]??$(k).value);$('auth_mode').value=c.auth_mode||(c.login_url?'basic':'none');$('username').value=c.username||'';$('password').value='';$('password').placeholder=c.login_configured?'******** (stored)':'Password';$('totp_secret').value='';$('advanced_auth').classList.add('hidden');document.querySelectorAll('.day').forEach(x=>x.checked=(c.days||[]).includes(x.value));$('heading').textContent='Edit check';$('cancel').hidden=false;showAuth();showContext();scrollTo(0,document.body.scrollHeight)}
+function reset(){$('form').reset();$('id').value='';$('time_from').value='00:00';$('time_to').value='23:00';$('auth_mode').value='none';$('match_mode').value='literal';$('password').placeholder='Password';$('advanced_auth').classList.add('hidden');document.querySelectorAll('.day').forEach(x=>x.checked=true);$('heading').textContent='Add check';$('cancel').hidden=true;showAuth();showContext()}
 async function del(id){if(confirm('Delete this check?')){await fetch('./api/checks/'+encodeURIComponent(id),{method:'DELETE'});load()}}
 async function delProfile(id){if(confirm('Delete this AI profile?')){await fetch('./api/ai-profiles/'+encodeURIComponent(id),{method:'DELETE'});loadProfiles()}}
 async function testProfile(){let b=$('test_profile');b.disabled=true;$('profile_test_status').textContent='Testing...';let p={id:$('profile_id').value||undefined,name:$('profile_name').value,provider:$('profile_provider').value,model:$('profile_model').value,api_key:$('profile_key').value};try{let r=await fetch('./api/ai-profiles/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});let x=await r.json();$('profile_test_status').textContent=r.ok?'Provider responded successfully':(x.error||'Provider test failed')}catch(e){$('profile_test_status').textContent='Provider test failed'}finally{b.disabled=false}}
@@ -119,6 +121,8 @@ class CheckStore:
             old = next((x for x in self.checks if x.get("id") == check.get("id")), {})
             for secret in ("username", "password", "totp_secret"):
                 if not check.get(secret): check[secret] = old.get(secret, "")
+            if any(check.get(key) != old.get(key) for key in ("username_field", "password_field", "totp_field", "login_url")):
+                check.pop("auth_retry_done", None)
             if not check.get("name") or not check.get("url") or (not check.get("phrase") and not (check.get("match_mode") == "ai_context" and check.get("context_prompt"))):
                 raise ValueError("name, URL, and phrase or AI request are required")
             replacing = any(x.get("id") == check.get("id") for x in self.checks)

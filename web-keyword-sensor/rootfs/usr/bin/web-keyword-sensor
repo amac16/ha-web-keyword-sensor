@@ -31,13 +31,13 @@ def login_form_details(content, base_url):
     except Exception: return base_url, []
     return urljoin(base_url, parser.action) if parser.action else base_url, parser.inputs
 
-def choose_login_field(configured, inputs, kind):
+def login_field_candidates(configured, inputs, kind):
     names = {item["name"] for item in inputs}
-    if configured in names: return configured
+    if configured in names: return [configured]
     if kind == "password": candidates = [x for x in inputs if x["type"] == "password"]
     elif kind == "totp": candidates = [x for x in inputs if any(token in x["name"].lower() for token in ("totp", "otp", "code", "token"))]
     else: candidates = [x for x in inputs if x["type"] == "email" or x["autocomplete"] in ("username", "email") or any(token in x["name"].lower() for token in ("email", "user", "login"))]
-    return candidates[0]["name"] if candidates else configured
+    return [x["name"] for x in candidates] or [configured]
 
 def text(value): return SPACE.sub(" ", html.unescape(TAGS.sub(" ", value))).strip()
 def slug(value): return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or "web_keyword"
@@ -104,7 +104,7 @@ class App:
             timeout = max(5, min(int(self.options.get("request_timeout", 30)), 120)); verify = check.get("verify_ssl", True)
             max_bytes = max(64 * 1024, min(int(self.options.get("max_response_bytes", 2 * 1024 * 1024)), 16 * 1024 * 1024))
             status = None
-            if check.get("auth_mode", "basic") == "browser":
+            if check.get("auth_mode", "none") == "browser":
                 try: status, response_text = self.browser.fetch(check)
                 except Exception as error:
                     if check.get("match_mode") == "ai_context": self.ai_unavailable(check, state_topic, "browser request failed")
@@ -122,21 +122,34 @@ class App:
                             self.auth_failure(check, "credentials are missing"); return {"ok": False, "error": "credentials are missing"}
                         login_url = check.get("login_url") or check["url"]
                         login_page = session.get(login_url, headers=headers, timeout=timeout, verify=verify)
+                        login_page.raise_for_status()
                         action, inputs = login_form_details(login_page.text, login_page.url)
-                        username_field = choose_login_field(check.get("username_field", "username"), inputs, "username")
-                        password_field = choose_login_field(check.get("password_field", "password"), inputs, "password")
-                        login = {username_field: check["username"], password_field: check["password"]}
-                        if check.get("totp_secret"):
-                            totp_field = choose_login_field(check.get("totp_field", "totp"), inputs, "totp")
-                            login[totp_field] = pyotp.TOTP(check["totp_secret"]).now()
-                        auth_response = session.post(action, data=login, headers=headers, timeout=timeout, verify=verify, stream=True)
-                        success_text = check.get("success_text")
-                        auth_body = self.read_response(auth_response, max_bytes)
-                        _, remaining_inputs = login_form_details(auth_body, auth_response.url)
-                        if auth_response.status_code >= 400 or (success_text and success_text not in auth_body) or any(x["type"] == "password" for x in remaining_inputs):
+                        username_candidates = login_field_candidates(check.get("username_field", "username"), inputs, "username")
+                        password_candidates = login_field_candidates(check.get("password_field", "password"), inputs, "password")
+                        totp_candidates = login_field_candidates(check.get("totp_field", "totp"), inputs, "totp")
+                        pairs = []
+                        for username_field in username_candidates:
+                            for password_field in password_candidates:
+                                if (username_field, password_field) not in pairs: pairs.append((username_field, password_field))
+                        if not pairs: pairs = [(check.get("username_field", "username"), check.get("password_field", "password"))]
+                        if check.get("auth_retry_done"): pairs = pairs[:1]
+                        else:
+                            pairs = (pairs[:3] or [(check.get("username_field", "username"), check.get("password_field", "password"))])
+                            pairs = (pairs + [pairs[-1]] * 3)[:3]
+                        success = False
+                        for attempt, (username_field, password_field) in enumerate(pairs):
+                            login = {username_field: check["username"], password_field: check["password"]}
+                            if check.get("totp_secret"): login[totp_candidates[0]] = pyotp.TOTP(check["totp_secret"]).now()
+                            auth_response = session.post(action, data=login, headers=headers, timeout=timeout, verify=verify, stream=True)
+                            success_text = check.get("success_text")
+                            auth_body = self.read_response(auth_response, max_bytes)
+                            _, remaining_inputs = login_form_details(auth_body, auth_response.url)
+                            if auth_response.status_code < 400 and not (success_text and success_text not in auth_body) and not any(x["type"] == "password" for x in remaining_inputs):
+                                check["username_field"] = username_field; check["password_field"] = password_field; check["totp_field"] = totp_candidates[0]; check["auth_retry_done"] = True; check["auth_status"] = "Credentials successful"; self.store.put(check); success = True; break
+                            if attempt + 1 < len(pairs): time.sleep(5)
+                        if not success:
+                            check["auth_retry_done"] = True
                             self.auth_failure(check, f"login rejected (HTTP {auth_response.status_code})"); return {"ok": False, "error": "login rejected"}
-                        check["auth_status"] = "Credentials successful"
-                        self.store.put(check)
                     response = session.get(check["url"], headers=headers, timeout=timeout, verify=verify, stream=True)
                     status = response.status_code
                     if status in (401, 403):
