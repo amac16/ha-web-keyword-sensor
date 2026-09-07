@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.8.1
+
+- Advanced the app version after the authenticated-navigation improvements.
+
 ## 1.8.0
 
 - Hardened authenticated navigation for username/password checks.
